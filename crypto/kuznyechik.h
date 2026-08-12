@@ -14,4 +14,16 @@
 #define KUZNYECHIK_KEY_SIZE	32
 #define KUZNYECHIK_BLOCK_SIZE	16
 
+#include <linux/scatterlist.h>
+#include <linux/types.h>
+
+struct crypto_shash;
+struct crypto_skcipher;
+
+int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
+  struct crypto_shash *mac, struct scatterlist *sg, int nents,
+  unsigned int assoc_len, unsigned int data_len,
+  const u8 iv[KUZNYECHIK_BLOCK_SIZE], bool encrypt,
+  u8 tag[KUZNYECHIK_BLOCK_SIZE]);
+
 #endif

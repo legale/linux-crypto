@@ -43,6 +43,12 @@ struct kuz_cmac_desc_ctx {
   unsigned int len;
 };
 
+struct kuz_ctr_state {
+  u8 ctr[KUZNECHIK_BLOCK_SIZE];
+  u8 stream[KUZNECHIK_BLOCK_SIZE];
+  unsigned int used;
+};
+
 asmlinkage void kuz_encrypt_1way(const u8 *key, u8 *dst, const u8 *src,
                                  const u8 *table);
 asmlinkage void kuz_encrypt_4way(const u8 *key, u8 *dst, const u8 *src,
@@ -371,6 +377,167 @@ static int kuz_cmac_update(struct shash_desc *desc, const u8 *data,
   kernel_fpu_end();
   return 0;
 }
+
+/* Обновляет OMAC без отдельного входа в SIMD-контекст. */
+static void kuz_cmac_update_inner(const struct kuz_cmac_ctx *ctx,
+                                  struct kuz_cmac_desc_ctx *dctx,
+                                  const u8 *data, unsigned int len)
+{
+  unsigned int n;
+
+  if (dctx->len == KUZNECHIK_BLOCK_SIZE) {
+    kuz_cmac_process(ctx, dctx, dctx->buf);
+    dctx->len = 0;
+  }
+  if (dctx->len) {
+    n = min_t(unsigned int, len, KUZNECHIK_BLOCK_SIZE - dctx->len);
+    memcpy(dctx->buf + dctx->len, data, n);
+    dctx->len += n;
+    data += n;
+    len -= n;
+    if (dctx->len == KUZNECHIK_BLOCK_SIZE && len) {
+      kuz_cmac_process(ctx, dctx, dctx->buf);
+      dctx->len = 0;
+    }
+  }
+  while (len > KUZNECHIK_BLOCK_SIZE) {
+    kuz_cmac_process(ctx, dctx, data);
+    data += KUZNECHIK_BLOCK_SIZE;
+    len -= KUZNECHIK_BLOCK_SIZE;
+  }
+  if (len) {
+    memcpy(dctx->buf + dctx->len, data, len);
+    dctx->len += len;
+  }
+}
+
+/* Завершает OMAC без отдельного входа в SIMD-контекст. */
+static void kuz_cmac_final_inner(const struct kuz_cmac_ctx *ctx,
+                                 struct kuz_cmac_desc_ctx *dctx, u8 *out)
+{
+  u8 block[KUZNECHIK_BLOCK_SIZE] = {};
+
+  if (dctx->len == KUZNECHIK_BLOCK_SIZE) {
+    crypto_xor_cpy(block, dctx->buf, ctx->k1,
+                   KUZNECHIK_BLOCK_SIZE);
+  } else {
+    memcpy(block, dctx->buf, dctx->len);
+    block[dctx->len] = 0x80;
+    crypto_xor(block, ctx->k2, KUZNECHIK_BLOCK_SIZE);
+  }
+  crypto_xor(block, dctx->state, KUZNECHIK_BLOCK_SIZE);
+  kuz_encrypt_1way(ctx->cipher.key, out, block, (const u8 *)kuz_table);
+  memzero_explicit(block, sizeof(block));
+}
+
+/* Инициализирует поток CTR для последовательной обработки SG-фрагментов. */
+static void kuz_ctr_state_init(struct kuz_ctr_state *state, const u8 *iv)
+{
+  memcpy(state->ctr, iv, KUZNECHIK_BLOCK_SIZE);
+  state->used = KUZNECHIK_BLOCK_SIZE;
+}
+
+/* Обрабатывает часть CTR-потока и сохраняет остаток блока между фрагментами. */
+static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
+                              struct kuz_ctr_state *state, u8 *dst,
+                              const u8 *src, unsigned int len)
+{
+  u8 counters[KUZ_PAR_SIZE] __aligned(16);
+  u8 streams[KUZ_PAR_SIZE] __aligned(16);
+  unsigned int i;
+  unsigned int n;
+
+  if (state->used < KUZNECHIK_BLOCK_SIZE) {
+    n = min_t(unsigned int, len,
+              KUZNECHIK_BLOCK_SIZE - state->used);
+    crypto_xor_cpy(dst, src, state->stream + state->used, n);
+    state->used += n;
+    dst += n;
+    src += n;
+    len -= n;
+  }
+  while (len >= KUZ_PAR_SIZE) {
+    for (i = 0; i < KUZ_PAR_BLOCKS; i++) {
+      memcpy(counters + i * KUZNECHIK_BLOCK_SIZE, state->ctr,
+             KUZNECHIK_BLOCK_SIZE);
+      crypto_inc(state->ctr, KUZNECHIK_BLOCK_SIZE);
+    }
+    kuz_encrypt_4way(ctx->key, streams, counters, (const u8 *)kuz_table);
+    crypto_xor_cpy(dst, src, streams, KUZ_PAR_SIZE);
+    dst += KUZ_PAR_SIZE;
+    src += KUZ_PAR_SIZE;
+    len -= KUZ_PAR_SIZE;
+  }
+  while (len >= KUZNECHIK_BLOCK_SIZE) {
+    kuz_encrypt_1way(ctx->key, state->stream, state->ctr,
+                     (const u8 *)kuz_table);
+    crypto_inc(state->ctr, KUZNECHIK_BLOCK_SIZE);
+    crypto_xor_cpy(dst, src, state->stream, KUZNECHIK_BLOCK_SIZE);
+    dst += KUZNECHIK_BLOCK_SIZE;
+    src += KUZNECHIK_BLOCK_SIZE;
+    len -= KUZNECHIK_BLOCK_SIZE;
+  }
+  if (len) {
+    kuz_encrypt_1way(ctx->key, state->stream, state->ctr,
+                     (const u8 *)kuz_table);
+    crypto_inc(state->ctr, KUZNECHIK_BLOCK_SIZE);
+    crypto_xor_cpy(dst, src, state->stream, len);
+    state->used = len;
+  } else {
+    state->used = KUZNECHIK_BLOCK_SIZE;
+  }
+}
+
+/* Шифрует и считает OMAC за один проход по SG. */
+int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
+                          struct crypto_shash *mac,
+                          struct scatterlist *sg, int nents,
+                          unsigned int assoc_len, unsigned int data_len,
+                          const u8 iv[KUZNECHIK_BLOCK_SIZE], bool encrypt,
+                          u8 tag[KUZNECHIK_BLOCK_SIZE])
+{
+  const struct kuz_simd_ctx *cipher_ctx = crypto_skcipher_ctx(cipher);
+  const struct kuz_cmac_ctx *mac_ctx = crypto_shash_ctx(mac);
+  struct kuz_cmac_desc_ctx cmac = {};
+  struct kuz_ctr_state ctr;
+  struct sg_mapping_iter miter;
+  unsigned int total = assoc_len + data_len;
+  unsigned int done = 0;
+  unsigned int n;
+  unsigned int pos;
+
+  if (!crypto_simd_usable())
+    return -EOPNOTSUPP;
+
+  kuz_ctr_state_init(&ctr, iv);
+  sg_miter_start(&miter, sg, nents, SG_MITER_TO_SG | SG_MITER_ATOMIC);
+  kernel_fpu_begin();
+  while (done < total && sg_miter_next(&miter)) {
+    n = min_t(unsigned int, miter.length, total - done);
+    pos = 0;
+    if (done < assoc_len) {
+      pos = min_t(unsigned int, n, assoc_len - done);
+      kuz_cmac_update_inner(mac_ctx, &cmac, miter.addr, pos);
+    }
+    if (pos < n) {
+      if (!encrypt)
+        kuz_cmac_update_inner(mac_ctx, &cmac, miter.addr + pos, n - pos);
+      kuz_ctr_state_xor(cipher_ctx, &ctr, miter.addr + pos,
+                        miter.addr + pos, n - pos);
+      if (encrypt)
+        kuz_cmac_update_inner(mac_ctx, &cmac, miter.addr + pos, n - pos);
+    }
+    done += n;
+  }
+  if (done == total)
+    kuz_cmac_final_inner(mac_ctx, &cmac, tag);
+  kernel_fpu_end();
+  sg_miter_stop(&miter);
+  memzero_explicit(&cmac, sizeof(cmac));
+  memzero_explicit(&ctr, sizeof(ctr));
+  return done == total ? 0 : -EINVAL;
+}
+EXPORT_SYMBOL_GPL(kuznechik_ctr_omac_sg);
 
 static int kuz_cmac_final(struct shash_desc *desc, u8 *out)
 {
