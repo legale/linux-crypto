@@ -29,9 +29,14 @@
 
 #include <linux/crypto.h>
 #include <linux/module.h>
+#include <linux/version.h>
 
 #include <asm/byteorder.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+#include <linux/unaligned.h>
+#else
 #include <asm/unaligned.h>
+#endif
 
 #include <crypto/internal/hash.h>
 #include <crypto/gost28147.h>

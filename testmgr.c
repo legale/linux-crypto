@@ -1891,6 +1891,13 @@ static const struct alg_test_desc alg_test_descs[] = {
 		}
 	},
 	{
+		.alg = "cmac(kuznyechik-simd)",
+		.test = alg_test_hash,
+		.suite = {
+			.hash = __VECS(cmac_kuznyechik_tv_template)
+		}
+	},
+	{
 		.alg = "cmac(magma)",
 		.test = alg_test_hash,
 		.suite = {
@@ -1969,6 +1976,13 @@ static const struct alg_test_desc alg_test_descs[] = {
 	},
 	{
 		.alg = "ecb(kuznyechik)",
+		.test = alg_test_skcipher,
+		.suite = {
+			.cipher = __VECS(kuznyechik_tv_template)
+		}
+	},
+	{
+		.alg = "ecb(kuznyechik-simd)",
 		.test = alg_test_skcipher,
 		.suite = {
 			.cipher = __VECS(kuznyechik_tv_template)

@@ -38,7 +38,11 @@
 #include <linux/crypto.h>
 #include <linux/version.h>
 #include <asm/byteorder.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+#include <linux/unaligned.h>
+#else
 #include <asm/unaligned.h>
+#endif
 #include "gost28147_int.h"
 
 struct crypto_gost28147_mode_ctx {
