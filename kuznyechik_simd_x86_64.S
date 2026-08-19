@@ -34,7 +34,7 @@
  * Input/output: xmm0
  * Table:        rcx
  */
-.Lkuz_transform1:
+SYM_FUNC_START_LOCAL(kuz_transform1)
   movdqa %xmm0, %xmm4
   movdqa .Lkuz_byte_pos(%rip), %xmm12
   punpcklbw %xmm12, %xmm4
@@ -62,6 +62,7 @@
 
   movdqa %xmm8, %xmm0
   RET
+SYM_FUNC_END(kuz_transform1)
 
 /*
  * Apply one fused table round to four independent blocks.
@@ -70,7 +71,7 @@
  * Output: xmm0..xmm3
  * Table:  rcx
  */
-.Lkuz_transform4:
+SYM_FUNC_START_LOCAL(kuz_transform4)
   movdqa %xmm0, %xmm4
   movdqa %xmm1, %xmm5
   movdqa %xmm2, %xmm6
@@ -121,6 +122,7 @@
   movdqa %xmm10, %xmm2
   movdqa %xmm11, %xmm3
   RET
+SYM_FUNC_END(kuz_transform4)
 
 SYM_FUNC_START(kuz_encrypt_4way)
   movdqu 0(%rdx), %xmm0
@@ -135,7 +137,7 @@ SYM_FUNC_START(kuz_encrypt_4way)
   pxor %xmm13, %xmm1
   pxor %xmm13, %xmm2
   pxor %xmm13, %xmm3
-  call .Lkuz_transform4
+  call kuz_transform4
   add $16, %edx
   cmp $144, %edx
   jne .Lkuz_enc_round
@@ -159,7 +161,7 @@ SYM_FUNC_START(kuz_encrypt_1way)
 .Lkuz_enc_one_round:
   movdqu (%rdi,%rdx), %xmm13
   pxor %xmm13, %xmm0
-  call .Lkuz_transform1
+  call kuz_transform1
   add $16, %edx
   cmp $144, %edx
   jne .Lkuz_enc_one_round
@@ -176,7 +178,7 @@ SYM_FUNC_START(kuz_decrypt_4way)
   movdqu 32(%rdx), %xmm2
   movdqu 48(%rdx), %xmm3
 
-  call .Lkuz_transform4
+  call kuz_transform4
   movdqu 144(%rdi), %xmm13
   pxor %xmm13, %xmm0
   pxor %xmm13, %xmm1
@@ -186,7 +188,7 @@ SYM_FUNC_START(kuz_decrypt_4way)
   mov %r8, %rcx
   mov $128, %edx
 .Lkuz_dec_round:
-  call .Lkuz_transform4
+  call kuz_transform4
   movdqu (%rdi,%rdx), %xmm13
   pxor %xmm13, %xmm0
   pxor %xmm13, %xmm1
