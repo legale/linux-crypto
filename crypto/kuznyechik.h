@@ -24,6 +24,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
   struct crypto_shash *mac, struct scatterlist *sg, int nents,
   unsigned int assoc_len, unsigned int data_len,
   const u8 iv[KUZNYECHIK_BLOCK_SIZE], bool encrypt,
+  const u8 expected_tag[KUZNYECHIK_BLOCK_SIZE],
   u8 tag[KUZNYECHIK_BLOCK_SIZE]);
 
 #endif

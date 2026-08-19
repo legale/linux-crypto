@@ -494,6 +494,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
                           struct scatterlist *sg, int nents,
                           unsigned int assoc_len, unsigned int data_len,
                           const u8 iv[KUZNECHIK_BLOCK_SIZE], bool encrypt,
+                          const u8 expected_tag[KUZNECHIK_BLOCK_SIZE],
                           u8 tag[KUZNECHIK_BLOCK_SIZE])
 {
   const struct kuz_simd_ctx *cipher_ctx = crypto_skcipher_ctx(cipher);
@@ -505,9 +506,55 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
   unsigned int done = 0;
   unsigned int n;
   unsigned int pos;
+  int ret = 0;
 
   if (!crypto_simd_usable())
     return -EOPNOTSUPP;
+
+  if (!encrypt) {
+    if (!expected_tag)
+      return -EINVAL;
+
+    sg_miter_start(&miter, sg, nents, SG_MITER_FROM_SG | SG_MITER_ATOMIC);
+    kernel_fpu_begin();
+    while (done < total && sg_miter_next(&miter)) {
+      n = min_t(unsigned int, miter.length, total - done);
+      kuz_cmac_update_inner(mac_ctx, &cmac, miter.addr, n);
+      done += n;
+    }
+    if (done == total)
+      kuz_cmac_final_inner(mac_ctx, &cmac, tag);
+    kernel_fpu_end();
+    sg_miter_stop(&miter);
+    if (done != total) {
+      ret = -EINVAL;
+      goto out;
+    }
+    if (crypto_memneq(tag, expected_tag, KUZNECHIK_BLOCK_SIZE)) {
+      ret = -EBADMSG;
+      goto out;
+    }
+
+    done = 0;
+    kuz_ctr_state_init(&ctr, iv);
+    sg_miter_start(&miter, sg, nents, SG_MITER_TO_SG | SG_MITER_ATOMIC);
+    kernel_fpu_begin();
+    while (done < total && sg_miter_next(&miter)) {
+      n = min_t(unsigned int, miter.length, total - done);
+      pos = 0;
+      if (done < assoc_len)
+        pos = min_t(unsigned int, n, assoc_len - done);
+      if (pos < n)
+        kuz_ctr_state_xor(cipher_ctx, &ctr, miter.addr + pos,
+                          miter.addr + pos, n - pos);
+      done += n;
+    }
+    kernel_fpu_end();
+    sg_miter_stop(&miter);
+    if (done != total)
+      ret = -EINVAL;
+    goto out;
+  }
 
   kuz_ctr_state_init(&ctr, iv);
   sg_miter_start(&miter, sg, nents, SG_MITER_TO_SG | SG_MITER_ATOMIC);
@@ -533,9 +580,11 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
     kuz_cmac_final_inner(mac_ctx, &cmac, tag);
   kernel_fpu_end();
   sg_miter_stop(&miter);
+  ret = done == total ? 0 : -EINVAL;
+out:
   memzero_explicit(&cmac, sizeof(cmac));
   memzero_explicit(&ctr, sizeof(ctr));
-  return done == total ? 0 : -EINVAL;
+  return ret;
 }
 EXPORT_SYMBOL_GPL(kuznechik_ctr_omac_sg);
 
