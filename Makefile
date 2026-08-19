@@ -16,7 +16,7 @@ gost28147_generic-y := gost28147_basic.o gost28147_modes.o
 kuznyechik_simd-y := kuznyechik_simd_glue.o kuznyechik_simd_x86_64.o
 gost-test-y:= testmgr.o gost-test-main.o
 
-ccflags-y := -I $(PWD)
+ccflags-y := -I $(src)
 
 # Make IS_ENABLED(CONFIG_CRYPTO_STREEBOG) work
 ifneq ($(CONFIG_CRYPTO_STREEBOG),n)
@@ -26,4 +26,4 @@ endif
 all: modules
 
 modules modules_install clean:
-	$(MAKE) -C $(KSRC) M=$(PWD) $@
+	$(MAKE) -C $(KSRC) M=$(CURDIR) $@
