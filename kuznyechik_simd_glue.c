@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * GOST R 34.12-2015 (Kuznyechik), x86-64 SIMD implementation.
+ * GOST R 34.12-2015 (Kuznyechik), SIMD implementation.
  */
 
 #include <crypto/internal/hash.h>
@@ -15,8 +15,15 @@
 #include <asm/unaligned.h>
 #endif
 
+#if defined(CONFIG_X86_64)
 #include <asm/cpufeature.h>
 #include <asm/simd.h>
+#elif defined(CONFIG_ARM64)
+#include <asm/neon.h>
+#include <asm/simd.h>
+#else
+#error "Kuznyechik SIMD is supported only on x86-64 and ARM64"
+#endif
 
 #include <crypto/kuznyechik.h>
 
@@ -25,6 +32,44 @@
 #define KUZ_SUBKEYS_SIZE (KUZNYECHIK_BLOCK_SIZE * 10)
 #define KUZ_PAR_BLOCKS 4
 #define KUZ_PAR_SIZE (KUZ_PAR_BLOCKS * KUZNYECHIK_BLOCK_SIZE)
+
+#if defined(CONFIG_X86_64)
+#define KUZ_SIMD_ARCH "x86_64"
+
+static inline bool kuz_simd_available(void)
+{
+  return boot_cpu_has(X86_FEATURE_XMM2);
+}
+
+static inline void kuz_simd_begin(void)
+{
+  kernel_fpu_begin();
+}
+
+static inline void kuz_simd_end(void)
+{
+  kernel_fpu_end();
+}
+#elif defined(CONFIG_ARM64)
+#define KUZ_SIMD_ARCH "arm64-neon"
+
+static inline bool kuz_simd_available(void)
+{
+  return cpu_has_neon();
+}
+
+static inline void kuz_simd_begin(void)
+{
+  kernel_neon_begin();
+}
+
+static inline void kuz_simd_end(void)
+{
+  kernel_neon_end();
+}
+#endif
+
+#define KUZ_SIMD_DRIVER(name) name "-kuznyechik-simd-" KUZ_SIMD_ARCH
 
 struct kuz_simd_ctx {
   u8 key[KUZ_SUBKEYS_SIZE];
@@ -200,14 +245,14 @@ static int kuz_simd_crypt(struct skcipher_request *req, bool decrypt)
   while (walk.nbytes) {
     bytes = round_down(walk.nbytes, KUZNYECHIK_BLOCK_SIZE);
 
-    kernel_fpu_begin();
+    kuz_simd_begin();
     if (decrypt)
       kuz_decrypt_blocks(ctx, walk.dst.virt.addr, walk.src.virt.addr,
                          bytes);
     else
       kuz_encrypt_blocks(ctx, walk.dst.virt.addr, walk.src.virt.addr,
                          bytes);
-    kernel_fpu_end();
+    kuz_simd_end();
 
     err = skcipher_walk_done(&walk, walk.nbytes - bytes);
   }
@@ -274,10 +319,10 @@ static int kuz_ctr_crypt(struct skcipher_request *req)
     if (bytes < walk.total)
       bytes = round_down(bytes, walk.stride);
 
-    kernel_fpu_begin();
+    kuz_simd_begin();
     kuz_ctr_blocks(ctx, walk.dst.virt.addr, walk.src.virt.addr, bytes,
                    walk.iv);
-    kernel_fpu_end();
+    kuz_simd_end();
 
     err = skcipher_walk_done(&walk, walk.nbytes - bytes);
   }
@@ -309,9 +354,9 @@ static int kuz_cmac_setkey(struct crypto_shash *tfm, const u8 *key,
   if (!crypto_simd_usable())
     return -EOPNOTSUPP;
 
-  kernel_fpu_begin();
+  kuz_simd_begin();
   kuz_encrypt_1way(ctx->cipher.key, block, block, (const u8 *)kuz_table);
-  kernel_fpu_end();
+  kuz_simd_end();
   kuz_cmac_double(ctx->k1, block);
   kuz_cmac_double(ctx->k2, ctx->k1);
   memzero_explicit(block, sizeof(block));
@@ -349,7 +394,7 @@ static int kuz_cmac_update(struct shash_desc *desc, const u8 *data,
   if (!crypto_simd_usable())
     return -EOPNOTSUPP;
 
-  kernel_fpu_begin();
+  kuz_simd_begin();
   if (dctx->len == KUZNYECHIK_BLOCK_SIZE) {
     kuz_cmac_process(ctx, dctx, dctx->buf);
     dctx->len = 0;
@@ -374,7 +419,7 @@ static int kuz_cmac_update(struct shash_desc *desc, const u8 *data,
     memcpy(dctx->buf + dctx->len, data, len);
     dctx->len += len;
   }
-  kernel_fpu_end();
+  kuz_simd_end();
   return 0;
 }
 
@@ -516,7 +561,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
       return -EINVAL;
 
     sg_miter_start(&miter, sg, nents, SG_MITER_FROM_SG | SG_MITER_ATOMIC);
-    kernel_fpu_begin();
+    kuz_simd_begin();
     while (done < total && sg_miter_next(&miter)) {
       n = min_t(unsigned int, miter.length, total - done);
       kuz_cmac_update_inner(mac_ctx, &cmac, miter.addr, n);
@@ -524,7 +569,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
     }
     if (done == total)
       kuz_cmac_final_inner(mac_ctx, &cmac, tag);
-    kernel_fpu_end();
+    kuz_simd_end();
     sg_miter_stop(&miter);
     if (done != total) {
       ret = -EINVAL;
@@ -538,7 +583,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
     done = 0;
     kuz_ctr_state_init(&ctr, iv);
     sg_miter_start(&miter, sg, nents, SG_MITER_TO_SG | SG_MITER_ATOMIC);
-    kernel_fpu_begin();
+    kuz_simd_begin();
     while (done < total && sg_miter_next(&miter)) {
       n = min_t(unsigned int, miter.length, total - done);
       pos = 0;
@@ -549,7 +594,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
                           miter.addr + pos, n - pos);
       done += n;
     }
-    kernel_fpu_end();
+    kuz_simd_end();
     sg_miter_stop(&miter);
     if (done != total)
       ret = -EINVAL;
@@ -558,7 +603,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
 
   kuz_ctr_state_init(&ctr, iv);
   sg_miter_start(&miter, sg, nents, SG_MITER_TO_SG | SG_MITER_ATOMIC);
-  kernel_fpu_begin();
+  kuz_simd_begin();
   while (done < total && sg_miter_next(&miter)) {
     n = min_t(unsigned int, miter.length, total - done);
     pos = 0;
@@ -578,7 +623,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
   }
   if (done == total)
     kuz_cmac_final_inner(mac_ctx, &cmac, tag);
-  kernel_fpu_end();
+  kuz_simd_end();
   sg_miter_stop(&miter);
   ret = done == total ? 0 : -EINVAL;
 out:
@@ -607,9 +652,9 @@ static int kuz_cmac_final(struct shash_desc *desc, u8 *out)
   }
   crypto_xor(block, dctx->state, KUZNYECHIK_BLOCK_SIZE);
 
-  kernel_fpu_begin();
+  kuz_simd_begin();
   kuz_encrypt_1way(ctx->cipher.key, out, block, (const u8 *)kuz_table);
-  kernel_fpu_end();
+  kuz_simd_end();
   memzero_explicit(block, sizeof(block));
   return 0;
 }
@@ -617,7 +662,7 @@ static int kuz_cmac_final(struct shash_desc *desc, u8 *out)
 static struct skcipher_alg kuz_simd_algs[] = {
   {
     .base.cra_name = "ecb(kuznyechik-simd)",
-    .base.cra_driver_name = "ecb-kuznyechik-simd-x86_64",
+    .base.cra_driver_name = KUZ_SIMD_DRIVER("ecb"),
     .base.cra_priority = 300,
     .base.cra_blocksize = KUZNYECHIK_BLOCK_SIZE,
     .base.cra_ctxsize = sizeof(struct kuz_simd_ctx),
@@ -630,7 +675,7 @@ static struct skcipher_alg kuz_simd_algs[] = {
     .decrypt = kuz_simd_decrypt,
   }, {
     .base.cra_name = "ctr(kuznyechik-simd)",
-    .base.cra_driver_name = "ctr-kuznyechik-simd-x86_64",
+    .base.cra_driver_name = KUZ_SIMD_DRIVER("ctr"),
     .base.cra_priority = 300,
     .base.cra_blocksize = 1,
     .base.cra_ctxsize = sizeof(struct kuz_simd_ctx),
@@ -654,7 +699,7 @@ static struct shash_alg kuz_cmac_alg = {
   .descsize = sizeof(struct kuz_cmac_desc_ctx),
   .base = {
     .cra_name = "cmac(kuznyechik-simd)",
-    .cra_driver_name = "cmac-kuznyechik-simd-x86_64",
+    .cra_driver_name = KUZ_SIMD_DRIVER("cmac"),
     .cra_priority = 300,
     .cra_flags = CRYPTO_ALG_TYPE_SHASH,
     .cra_blocksize = KUZNYECHIK_BLOCK_SIZE,
@@ -667,7 +712,7 @@ static int __init kuz_simd_init(void)
 {
   int err;
 
-  if (!boot_cpu_has(X86_FEATURE_XMM2))
+  if (!kuz_simd_available())
     return -ENODEV;
 
   err = crypto_register_skciphers(kuz_simd_algs,
@@ -690,7 +735,7 @@ static void __exit kuz_simd_exit(void)
 module_init(kuz_simd_init);
 module_exit(kuz_simd_exit);
 
-MODULE_DESCRIPTION("GOST R 34.12-2015 Kuznyechik x86-64 SIMD cipher");
+MODULE_DESCRIPTION("GOST R 34.12-2015 Kuznyechik SIMD cipher");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS_CRYPTO("ecb(kuznyechik-simd)");
 MODULE_ALIAS_CRYPTO("ctr(kuznyechik-simd)");
