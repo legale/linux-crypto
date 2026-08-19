@@ -44,8 +44,8 @@ struct kuz_cmac_desc_ctx {
 };
 
 struct kuz_ctr_state {
-  u8 ctr[KUZNECHIK_BLOCK_SIZE];
-  u8 stream[KUZNECHIK_BLOCK_SIZE];
+  u8 ctr[KUZNYECHIK_BLOCK_SIZE];
+  u8 stream[KUZNYECHIK_BLOCK_SIZE];
   unsigned int used;
 };
 
@@ -385,25 +385,25 @@ static void kuz_cmac_update_inner(const struct kuz_cmac_ctx *ctx,
 {
   unsigned int n;
 
-  if (dctx->len == KUZNECHIK_BLOCK_SIZE) {
+  if (dctx->len == KUZNYECHIK_BLOCK_SIZE) {
     kuz_cmac_process(ctx, dctx, dctx->buf);
     dctx->len = 0;
   }
   if (dctx->len) {
-    n = min_t(unsigned int, len, KUZNECHIK_BLOCK_SIZE - dctx->len);
+    n = min_t(unsigned int, len, KUZNYECHIK_BLOCK_SIZE - dctx->len);
     memcpy(dctx->buf + dctx->len, data, n);
     dctx->len += n;
     data += n;
     len -= n;
-    if (dctx->len == KUZNECHIK_BLOCK_SIZE && len) {
+    if (dctx->len == KUZNYECHIK_BLOCK_SIZE && len) {
       kuz_cmac_process(ctx, dctx, dctx->buf);
       dctx->len = 0;
     }
   }
-  while (len > KUZNECHIK_BLOCK_SIZE) {
+  while (len > KUZNYECHIK_BLOCK_SIZE) {
     kuz_cmac_process(ctx, dctx, data);
-    data += KUZNECHIK_BLOCK_SIZE;
-    len -= KUZNECHIK_BLOCK_SIZE;
+    data += KUZNYECHIK_BLOCK_SIZE;
+    len -= KUZNYECHIK_BLOCK_SIZE;
   }
   if (len) {
     memcpy(dctx->buf + dctx->len, data, len);
@@ -415,17 +415,17 @@ static void kuz_cmac_update_inner(const struct kuz_cmac_ctx *ctx,
 static void kuz_cmac_final_inner(const struct kuz_cmac_ctx *ctx,
                                  struct kuz_cmac_desc_ctx *dctx, u8 *out)
 {
-  u8 block[KUZNECHIK_BLOCK_SIZE] = {};
+  u8 block[KUZNYECHIK_BLOCK_SIZE] = {};
 
-  if (dctx->len == KUZNECHIK_BLOCK_SIZE) {
+  if (dctx->len == KUZNYECHIK_BLOCK_SIZE) {
     crypto_xor_cpy(block, dctx->buf, ctx->k1,
-                   KUZNECHIK_BLOCK_SIZE);
+                   KUZNYECHIK_BLOCK_SIZE);
   } else {
     memcpy(block, dctx->buf, dctx->len);
     block[dctx->len] = 0x80;
-    crypto_xor(block, ctx->k2, KUZNECHIK_BLOCK_SIZE);
+    crypto_xor(block, ctx->k2, KUZNYECHIK_BLOCK_SIZE);
   }
-  crypto_xor(block, dctx->state, KUZNECHIK_BLOCK_SIZE);
+  crypto_xor(block, dctx->state, KUZNYECHIK_BLOCK_SIZE);
   kuz_encrypt_1way(ctx->cipher.key, out, block, (const u8 *)kuz_table);
   memzero_explicit(block, sizeof(block));
 }
@@ -433,8 +433,8 @@ static void kuz_cmac_final_inner(const struct kuz_cmac_ctx *ctx,
 /* Инициализирует поток CTR для последовательной обработки SG-фрагментов. */
 static void kuz_ctr_state_init(struct kuz_ctr_state *state, const u8 *iv)
 {
-  memcpy(state->ctr, iv, KUZNECHIK_BLOCK_SIZE);
-  state->used = KUZNECHIK_BLOCK_SIZE;
+  memcpy(state->ctr, iv, KUZNYECHIK_BLOCK_SIZE);
+  state->used = KUZNYECHIK_BLOCK_SIZE;
 }
 
 /* Обрабатывает часть CTR-потока и сохраняет остаток блока между фрагментами. */
@@ -447,9 +447,9 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
   unsigned int i;
   unsigned int n;
 
-  if (state->used < KUZNECHIK_BLOCK_SIZE) {
+  if (state->used < KUZNYECHIK_BLOCK_SIZE) {
     n = min_t(unsigned int, len,
-              KUZNECHIK_BLOCK_SIZE - state->used);
+              KUZNYECHIK_BLOCK_SIZE - state->used);
     crypto_xor_cpy(dst, src, state->stream + state->used, n);
     state->used += n;
     dst += n;
@@ -458,9 +458,9 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
   }
   while (len >= KUZ_PAR_SIZE) {
     for (i = 0; i < KUZ_PAR_BLOCKS; i++) {
-      memcpy(counters + i * KUZNECHIK_BLOCK_SIZE, state->ctr,
-             KUZNECHIK_BLOCK_SIZE);
-      crypto_inc(state->ctr, KUZNECHIK_BLOCK_SIZE);
+      memcpy(counters + i * KUZNYECHIK_BLOCK_SIZE, state->ctr,
+             KUZNYECHIK_BLOCK_SIZE);
+      crypto_inc(state->ctr, KUZNYECHIK_BLOCK_SIZE);
     }
     kuz_encrypt_4way(ctx->key, streams, counters, (const u8 *)kuz_table);
     crypto_xor_cpy(dst, src, streams, KUZ_PAR_SIZE);
@@ -468,23 +468,23 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
     src += KUZ_PAR_SIZE;
     len -= KUZ_PAR_SIZE;
   }
-  while (len >= KUZNECHIK_BLOCK_SIZE) {
+  while (len >= KUZNYECHIK_BLOCK_SIZE) {
     kuz_encrypt_1way(ctx->key, state->stream, state->ctr,
                      (const u8 *)kuz_table);
-    crypto_inc(state->ctr, KUZNECHIK_BLOCK_SIZE);
-    crypto_xor_cpy(dst, src, state->stream, KUZNECHIK_BLOCK_SIZE);
-    dst += KUZNECHIK_BLOCK_SIZE;
-    src += KUZNECHIK_BLOCK_SIZE;
-    len -= KUZNECHIK_BLOCK_SIZE;
+    crypto_inc(state->ctr, KUZNYECHIK_BLOCK_SIZE);
+    crypto_xor_cpy(dst, src, state->stream, KUZNYECHIK_BLOCK_SIZE);
+    dst += KUZNYECHIK_BLOCK_SIZE;
+    src += KUZNYECHIK_BLOCK_SIZE;
+    len -= KUZNYECHIK_BLOCK_SIZE;
   }
   if (len) {
     kuz_encrypt_1way(ctx->key, state->stream, state->ctr,
                      (const u8 *)kuz_table);
-    crypto_inc(state->ctr, KUZNECHIK_BLOCK_SIZE);
+    crypto_inc(state->ctr, KUZNYECHIK_BLOCK_SIZE);
     crypto_xor_cpy(dst, src, state->stream, len);
     state->used = len;
   } else {
-    state->used = KUZNECHIK_BLOCK_SIZE;
+    state->used = KUZNYECHIK_BLOCK_SIZE;
   }
 }
 
@@ -493,9 +493,9 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
                           struct crypto_shash *mac,
                           struct scatterlist *sg, int nents,
                           unsigned int assoc_len, unsigned int data_len,
-                          const u8 iv[KUZNECHIK_BLOCK_SIZE], bool encrypt,
-                          const u8 expected_tag[KUZNECHIK_BLOCK_SIZE],
-                          u8 tag[KUZNECHIK_BLOCK_SIZE])
+                          const u8 iv[KUZNYECHIK_BLOCK_SIZE], bool encrypt,
+                          const u8 expected_tag[KUZNYECHIK_BLOCK_SIZE],
+                          u8 tag[KUZNYECHIK_BLOCK_SIZE])
 {
   const struct kuz_simd_ctx *cipher_ctx = crypto_skcipher_ctx(cipher);
   const struct kuz_cmac_ctx *mac_ctx = crypto_shash_ctx(mac);
@@ -530,7 +530,7 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
       ret = -EINVAL;
       goto out;
     }
-    if (crypto_memneq(tag, expected_tag, KUZNECHIK_BLOCK_SIZE)) {
+    if (crypto_memneq(tag, expected_tag, KUZNYECHIK_BLOCK_SIZE)) {
       ret = -EBADMSG;
       goto out;
     }
