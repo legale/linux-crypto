@@ -27,4 +27,21 @@ int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
   const u8 expected_tag[KUZNYECHIK_BLOCK_SIZE],
   u8 tag[KUZNYECHIK_BLOCK_SIZE]);
 
+#define KUZNYECHIK_OMAC_BATCH 8
+
+struct kuznyechik_ctr_omac_req {
+  struct scatterlist *sg;
+  int nents;
+  unsigned int assoc_len;
+  unsigned int data_len;
+  const u8 *iv;
+  const u8 *expected_tag;
+  u8 *tag;
+  int status;
+};
+
+int kuznechik_ctr_omac_sg_batch(struct crypto_skcipher *cipher,
+  struct crypto_shash *mac, struct kuznyechik_ctr_omac_req *req,
+  unsigned int count, bool encrypt);
+
 #endif

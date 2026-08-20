@@ -634,6 +634,245 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
   }
 }
 
+struct kuz_sg_reader {
+  struct sg_mapping_iter miter;
+  unsigned int pos;
+};
+
+static void kuz_sg_reader_start(struct kuz_sg_reader *r,
+                                struct scatterlist *sg, int nents)
+{
+  memset(r, 0, sizeof(*r));
+  sg_miter_start(&r->miter, sg, nents, SG_MITER_FROM_SG | SG_MITER_ATOMIC);
+}
+
+static int kuz_sg_reader_read(struct kuz_sg_reader *r, u8 *dst,
+                              unsigned int len)
+{
+  unsigned int n;
+
+  while (len) {
+    if (r->pos == r->miter.length) {
+      if (!sg_miter_next(&r->miter))
+        return -EINVAL;
+      r->pos = 0;
+    }
+    n = min_t(unsigned int, len, r->miter.length - r->pos);
+    memcpy(dst, r->miter.addr + r->pos, n);
+    r->pos += n;
+    dst += n;
+    len -= n;
+  }
+  return 0;
+}
+
+static void kuz_sg_reader_stop(struct kuz_sg_reader *r)
+{
+  sg_miter_stop(&r->miter);
+}
+
+static void kuz_encrypt_batch_blocks(const u8 *key, u8 *dst, const u8 *src,
+                                     unsigned int n)
+{
+#if defined(CONFIG_ARM64)
+  u8 in[KUZ_PAR_SIZE] __aligned(16) = {};
+  u8 out[KUZ_PAR_SIZE] __aligned(16);
+
+  if (n > KUZ_HALF_BLOCKS) {
+    memcpy(in, src, n * KUZNYECHIK_BLOCK_SIZE);
+    kuz_encrypt_parallel(key, out, in);
+    memcpy(dst, out, n * KUZNYECHIK_BLOCK_SIZE);
+    return;
+  }
+  if (n > 1) {
+    memcpy(in, src, n * KUZNYECHIK_BLOCK_SIZE);
+    kuz_encrypt_half(key, out, in);
+    memcpy(dst, out, n * KUZNYECHIK_BLOCK_SIZE);
+    return;
+  }
+#else
+  u8 in[KUZ_PAR_SIZE] __aligned(16) = {};
+  u8 out[KUZ_PAR_SIZE] __aligned(16);
+
+  while (n >= KUZ_PAR_BLOCKS) {
+    kuz_encrypt_parallel(key, dst, src);
+    dst += KUZ_PAR_SIZE;
+    src += KUZ_PAR_SIZE;
+    n -= KUZ_PAR_BLOCKS;
+  }
+  if (n > 1) {
+    memcpy(in, src, n * KUZNYECHIK_BLOCK_SIZE);
+    kuz_encrypt_parallel(key, out, in);
+    memcpy(dst, out, n * KUZNYECHIK_BLOCK_SIZE);
+    return;
+  }
+#endif
+  if (n)
+    kuz_encrypt_1way(key, dst, src, (const u8 *)kuz_table);
+}
+
+static int kuz_cmac_batch(const struct kuz_cmac_ctx *ctx,
+                          struct kuznyechik_ctr_omac_req *req,
+                          unsigned int count)
+{
+  struct kuz_sg_reader reader[KUZNYECHIK_OMAC_BATCH];
+  u8 state[KUZNYECHIK_OMAC_BATCH][KUZNYECHIK_BLOCK_SIZE] = {};
+  u8 in[KUZNYECHIK_OMAC_BATCH * KUZNYECHIK_BLOCK_SIZE] __aligned(16);
+  u8 out[KUZNYECHIK_OMAC_BATCH * KUZNYECHIK_BLOCK_SIZE] __aligned(16);
+  unsigned int blocks[KUZNYECHIK_OMAC_BATCH];
+  unsigned int map[KUZNYECHIK_OMAC_BATCH];
+  unsigned int max_blocks = 0;
+  unsigned int total;
+  unsigned int rem;
+  unsigned int round;
+  unsigned int active;
+  unsigned int i;
+  int ret = 0;
+
+  for (i = 0; i < count; i++) {
+    total = req[i].assoc_len + req[i].data_len;
+    blocks[i] = total ? (total - 1) / KUZNYECHIK_BLOCK_SIZE : 0;
+    max_blocks = max(max_blocks, blocks[i]);
+    kuz_sg_reader_start(&reader[i], req[i].sg, req[i].nents);
+  }
+
+  for (round = 0; round < max_blocks; round++) {
+    active = 0;
+    for (i = 0; i < count; i++) {
+      if (round >= blocks[i])
+        continue;
+      ret = kuz_sg_reader_read(&reader[i], in + active * KUZNYECHIK_BLOCK_SIZE,
+                               KUZNYECHIK_BLOCK_SIZE);
+      if (ret)
+        goto out;
+      crypto_xor(in + active * KUZNYECHIK_BLOCK_SIZE, state[i],
+                 KUZNYECHIK_BLOCK_SIZE);
+      map[active++] = i;
+    }
+    kuz_encrypt_batch_blocks(ctx->cipher.key, out, in, active);
+    for (i = 0; i < active; i++)
+      memcpy(state[map[i]], out + i * KUZNYECHIK_BLOCK_SIZE,
+             KUZNYECHIK_BLOCK_SIZE);
+  }
+
+  for (i = 0; i < count; i++) {
+    u8 *block = in + i * KUZNYECHIK_BLOCK_SIZE;
+
+    total = req[i].assoc_len + req[i].data_len;
+    rem = total - blocks[i] * KUZNYECHIK_BLOCK_SIZE;
+    memset(block, 0, KUZNYECHIK_BLOCK_SIZE);
+    if (rem) {
+      ret = kuz_sg_reader_read(&reader[i], block, rem);
+      if (ret)
+        goto out;
+    }
+    if (rem == KUZNYECHIK_BLOCK_SIZE) {
+      crypto_xor(block, ctx->k1, KUZNYECHIK_BLOCK_SIZE);
+    } else {
+      block[rem] = 0x80;
+      crypto_xor(block, ctx->k2, KUZNYECHIK_BLOCK_SIZE);
+    }
+    crypto_xor(block, state[i], KUZNYECHIK_BLOCK_SIZE);
+  }
+  kuz_encrypt_batch_blocks(ctx->cipher.key, out, in, count);
+  for (i = 0; i < count; i++)
+    memcpy(req[i].tag, out + i * KUZNYECHIK_BLOCK_SIZE,
+           KUZNYECHIK_BLOCK_SIZE);
+out:
+  for (i = 0; i < count; i++)
+    kuz_sg_reader_stop(&reader[i]);
+  memzero_explicit(state, sizeof(state));
+  memzero_explicit(in, sizeof(in));
+  memzero_explicit(out, sizeof(out));
+  return ret;
+}
+
+static int kuz_ctr_sg(const struct kuz_simd_ctx *ctx,
+                      struct kuznyechik_ctr_omac_req *req)
+{
+  struct kuz_ctr_state ctr;
+  struct sg_mapping_iter miter;
+  unsigned int total = req->assoc_len + req->data_len;
+  unsigned int done = 0;
+  unsigned int pos;
+  unsigned int n;
+
+  kuz_ctr_state_init(&ctr, req->iv);
+  sg_miter_start(&miter, req->sg, req->nents,
+                 SG_MITER_TO_SG | SG_MITER_ATOMIC);
+  while (done < total && sg_miter_next(&miter)) {
+    n = min_t(unsigned int, miter.length, total - done);
+    pos = 0;
+    if (done < req->assoc_len)
+      pos = min_t(unsigned int, n, req->assoc_len - done);
+    if (pos < n)
+      kuz_ctr_state_xor(ctx, &ctr, miter.addr + pos, miter.addr + pos,
+                        n - pos);
+    done += n;
+  }
+  sg_miter_stop(&miter);
+  memzero_explicit(&ctr, sizeof(ctr));
+  return done == total ? 0 : -EINVAL;
+}
+
+int kuznechik_ctr_omac_sg_batch(struct crypto_skcipher *cipher,
+                                struct crypto_shash *mac,
+                                struct kuznyechik_ctr_omac_req *req,
+                                unsigned int count, bool encrypt)
+{
+  const struct kuz_simd_ctx *cipher_ctx = crypto_skcipher_ctx(cipher);
+  const struct kuz_cmac_ctx *mac_ctx = crypto_shash_ctx(mac);
+  unsigned int i;
+  int ret;
+
+  if (!count || count > KUZNYECHIK_OMAC_BATCH)
+    return -EINVAL;
+  if (!crypto_simd_usable())
+    return -EOPNOTSUPP;
+  if (!encrypt) {
+    for (i = 0; i < count; i++) {
+      if (!req[i].expected_tag || !req[i].tag)
+        return -EINVAL;
+    }
+  }
+  for (i = 0; i < count; i++) {
+    if (!req[i].sg || req[i].nents <= 0 || !req[i].iv || !req[i].tag)
+      return -EINVAL;
+    req[i].status = 0;
+  }
+
+  kuz_simd_begin();
+  if (encrypt) {
+    for (i = 0; i < count; i++) {
+      ret = kuz_ctr_sg(cipher_ctx, &req[i]);
+      if (ret)
+        goto out_err;
+    }
+  }
+  ret = kuz_cmac_batch(mac_ctx, req, count);
+  if (ret)
+    goto out_err;
+  if (!encrypt) {
+    for (i = 0; i < count; i++) {
+      if (crypto_memneq(req[i].tag, req[i].expected_tag,
+                        KUZNYECHIK_BLOCK_SIZE)) {
+        req[i].status = -EBADMSG;
+        continue;
+      }
+      req[i].status = kuz_ctr_sg(cipher_ctx, &req[i]);
+    }
+  }
+  kuz_simd_end();
+  return 0;
+
+out_err:
+  kuz_simd_end();
+  for (i = 0; i < count; i++)
+    req[i].status = ret;
+  return ret;
+}
+EXPORT_SYMBOL_GPL(kuznechik_ctr_omac_sg_batch);
+
 /* Шифрует и считает OMAC за один проход по SG. */
 int kuznechik_ctr_omac_sg(struct crypto_skcipher *cipher,
                           struct crypto_shash *mac,
