@@ -333,6 +333,88 @@ SYM_FUNC_START(kuz_encrypt_8way)
 	ret
 SYM_FUNC_END(kuz_encrypt_8way)
 
+
+/* x9: big-endian low counter, x8: big-endian high counter. */
+.macro KUZ_CTR_BLOCK reg, inc
+	adds	x10, x9, #\inc
+	adc	x11, x8, xzr
+	rev	x10, x10
+	rev	x11, x11
+	fmov	d\reg, x11
+	ins	v\reg\().d[1], x10
+.endm
+
+/*
+ * void kuz_ctr_8way(const u8 *key, u8 *dst, const u8 *src, u8 *ctr,
+ *                   const u8 *table);
+ */
+SYM_FUNC_START(kuz_ctr_8way)
+	ldr	x8, [x3]
+	ldr	x9, [x3, #8]
+	rev	x8, x8
+	rev	x9, x9
+
+	KUZ_CTR_BLOCK 0, 0
+	KUZ_CTR_BLOCK 1, 1
+	KUZ_CTR_BLOCK 2, 2
+	KUZ_CTR_BLOCK 3, 3
+	KUZ_CTR_BLOCK 4, 4
+	KUZ_CTR_BLOCK 5, 5
+	KUZ_CTR_BLOCK 6, 6
+	KUZ_CTR_BLOCK 7, 7
+
+	adds	x10, x9, #8
+	adc	x11, x8, xzr
+	rev	x10, x10
+	rev	x11, x11
+	str	x11, [x3]
+	str	x10, [x3, #8]
+
+	mov	x6, x0
+	mov	w7, #9
+.Lkuz_ctr_eight_round:
+	ldr	q16, [x6], #16
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+	KUZ_TRANSFORM8 x4
+	subs	w7, w7, #1
+	b.ne	.Lkuz_ctr_eight_round
+
+	ldr	q16, [x6]
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+
+	ldp	q8, q9, [x2]
+	ldp	q10, q11, [x2, #32]
+	ldp	q12, q13, [x2, #64]
+	ldp	q14, q15, [x2, #96]
+	eor	v0.16b, v0.16b, v8.16b
+	eor	v1.16b, v1.16b, v9.16b
+	eor	v2.16b, v2.16b, v10.16b
+	eor	v3.16b, v3.16b, v11.16b
+	eor	v4.16b, v4.16b, v12.16b
+	eor	v5.16b, v5.16b, v13.16b
+	eor	v6.16b, v6.16b, v14.16b
+	eor	v7.16b, v7.16b, v15.16b
+	stp	q0, q1, [x1]
+	stp	q2, q3, [x1, #32]
+	stp	q4, q5, [x1, #64]
+	stp	q6, q7, [x1, #96]
+	ret
+SYM_FUNC_END(kuz_ctr_8way)
+
 /*
  * void kuz_decrypt_8way(const u8 *dekey, u8 *dst, const u8 *src,
  *                       const u8 *inv_table, const u8 *inv_ls_table);

@@ -38,6 +38,11 @@
 #define KUZ_PAR_BLOCKS 4
 #endif
 #define KUZ_PAR_SIZE (KUZ_PAR_BLOCKS * KUZNYECHIK_BLOCK_SIZE)
+#if defined(CONFIG_ARM64)
+#define KUZ_CTR_TMP_SIZE KUZ_HALF_SIZE
+#else
+#define KUZ_CTR_TMP_SIZE KUZ_PAR_SIZE
+#endif
 
 #if defined(CONFIG_X86_64)
 #define KUZ_SIMD_ARCH "x86_64"
@@ -110,6 +115,8 @@ asmlinkage void kuz_decrypt_4way(const u8 *dekey, u8 *dst, const u8 *src,
 #if defined(CONFIG_ARM64)
 asmlinkage void kuz_encrypt_8way(const u8 *key, u8 *dst, const u8 *src,
                                  const u8 *table);
+asmlinkage void kuz_ctr_8way(const u8 *key, u8 *dst, const u8 *src, u8 *ctr,
+                             const u8 *table);
 asmlinkage void kuz_decrypt_8way(const u8 *dekey, u8 *dst, const u8 *src,
                                  const u8 *inv_table,
                                  const u8 *inv_ls_table);
@@ -345,12 +352,15 @@ static int kuz_simd_decrypt(struct skcipher_request *req)
 static void kuz_ctr_blocks(const struct kuz_simd_ctx *ctx, u8 *dst,
                            const u8 *src, unsigned int bytes, u8 *ctr)
 {
-  u8 counters[KUZ_PAR_SIZE] __aligned(16);
-  u8 stream[KUZ_PAR_SIZE] __aligned(16);
+  u8 counters[KUZ_CTR_TMP_SIZE] __aligned(16);
+  u8 stream[KUZ_CTR_TMP_SIZE] __aligned(16);
   unsigned int i;
   unsigned int n;
 
   while (bytes >= KUZ_PAR_SIZE) {
+#if defined(CONFIG_ARM64)
+    kuz_ctr_8way(ctx->key, dst, src, ctr, (const u8 *)kuz_table);
+#else
     for (i = 0; i < KUZ_PAR_BLOCKS; i++) {
       memcpy(counters + i * KUZNYECHIK_BLOCK_SIZE, ctr,
              KUZNYECHIK_BLOCK_SIZE);
@@ -358,6 +368,7 @@ static void kuz_ctr_blocks(const struct kuz_simd_ctx *ctx, u8 *dst,
     }
     kuz_encrypt_parallel(ctx->key, stream, counters);
     crypto_xor_cpy(dst, src, stream, KUZ_PAR_SIZE);
+#endif
     bytes -= KUZ_PAR_SIZE;
     src += KUZ_PAR_SIZE;
     dst += KUZ_PAR_SIZE;
@@ -574,8 +585,8 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
                               struct kuz_ctr_state *state, u8 *dst,
                               const u8 *src, unsigned int len)
 {
-  u8 counters[KUZ_PAR_SIZE] __aligned(16);
-  u8 streams[KUZ_PAR_SIZE] __aligned(16);
+  u8 counters[KUZ_CTR_TMP_SIZE] __aligned(16);
+  u8 streams[KUZ_CTR_TMP_SIZE] __aligned(16);
   unsigned int i;
   unsigned int n;
 
@@ -589,6 +600,10 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
     len -= n;
   }
   while (len >= KUZ_PAR_SIZE) {
+#if defined(CONFIG_ARM64)
+    kuz_ctr_8way(ctx->key, dst, src, state->ctr,
+                 (const u8 *)kuz_table);
+#else
     for (i = 0; i < KUZ_PAR_BLOCKS; i++) {
       memcpy(counters + i * KUZNYECHIK_BLOCK_SIZE, state->ctr,
              KUZNYECHIK_BLOCK_SIZE);
@@ -596,6 +611,7 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
     }
     kuz_encrypt_parallel(ctx->key, streams, counters);
     crypto_xor_cpy(dst, src, streams, KUZ_PAR_SIZE);
+#endif
     dst += KUZ_PAR_SIZE;
     src += KUZ_PAR_SIZE;
     len -= KUZ_PAR_SIZE;
