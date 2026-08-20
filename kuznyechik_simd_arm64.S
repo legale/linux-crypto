@@ -7,14 +7,6 @@
 
 .text
 
-.macro KUZ_LOOKUP1 lane
-  umov w9, v0.b[\lane]
-  add x9, x5, x9, lsl #4
-  ldr q16, [x9]
-  eor v4.16b, v4.16b, v16.16b
-  add x5, x5, #1, lsl #12
-.endm
-
 .macro KUZ_LOOKUP4 lane
   umov w9, v0.b[\lane]
   umov w10, v1.b[\lane]
@@ -38,30 +30,6 @@
   eor v7.16b, v7.16b, v16.16b
 
   add x5, x5, #1, lsl #12
-.endm
-
-.macro KUZ_TRANSFORM1 table
-  mov x5, \table
-  movi v4.16b, #0
-
-  KUZ_LOOKUP1 0
-  KUZ_LOOKUP1 1
-  KUZ_LOOKUP1 2
-  KUZ_LOOKUP1 3
-  KUZ_LOOKUP1 4
-  KUZ_LOOKUP1 5
-  KUZ_LOOKUP1 6
-  KUZ_LOOKUP1 7
-  KUZ_LOOKUP1 8
-  KUZ_LOOKUP1 9
-  KUZ_LOOKUP1 10
-  KUZ_LOOKUP1 11
-  KUZ_LOOKUP1 12
-  KUZ_LOOKUP1 13
-  KUZ_LOOKUP1 14
-  KUZ_LOOKUP1 15
-
-  mov v0.16b, v4.16b
 .endm
 
 .macro KUZ_TRANSFORM4 table
@@ -93,28 +61,6 @@
   mov v2.16b, v6.16b
   mov v3.16b, v7.16b
 .endm
-
-/*
- * void kuz_encrypt_1way(const u8 *key, u8 *dst, const u8 *src,
- *                       const u8 *table);
- */
-SYM_FUNC_START(kuz_encrypt_1way)
-  ldr q0, [x2]
-  mov x6, x0
-  mov w7, #9
-
-.Lkuz_enc_one_round:
-  ldr q16, [x6], #16
-  eor v0.16b, v0.16b, v16.16b
-  KUZ_TRANSFORM1 x3
-  subs w7, w7, #1
-  b.ne .Lkuz_enc_one_round
-
-  ldr q16, [x6]
-  eor v0.16b, v0.16b, v16.16b
-  str q0, [x1]
-  ret
-SYM_FUNC_END(kuz_encrypt_1way)
 
 /*
  * void kuz_encrypt_4way(const u8 *key, u8 *dst, const u8 *src,
