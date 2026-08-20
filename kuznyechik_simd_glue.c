@@ -30,7 +30,13 @@
 #include "kuztable.h"
 
 #define KUZ_SUBKEYS_SIZE (KUZNYECHIK_BLOCK_SIZE * 10)
+#if defined(CONFIG_ARM64)
+#define KUZ_PAR_BLOCKS 8
+#define KUZ_HALF_BLOCKS 4
+#define KUZ_HALF_SIZE (KUZ_HALF_BLOCKS * KUZNYECHIK_BLOCK_SIZE)
+#else
 #define KUZ_PAR_BLOCKS 4
+#endif
 #define KUZ_PAR_SIZE (KUZ_PAR_BLOCKS * KUZNYECHIK_BLOCK_SIZE)
 
 #if defined(CONFIG_X86_64)
@@ -155,6 +161,50 @@ asmlinkage void kuz_encrypt_4way(const u8 *key, u8 *dst, const u8 *src,
 asmlinkage void kuz_decrypt_4way(const u8 *dekey, u8 *dst, const u8 *src,
                                  const u8 *inv_table,
                                  const u8 *inv_ls_table);
+#if defined(CONFIG_ARM64)
+asmlinkage void kuz_encrypt_8way(const u8 *key, u8 *dst, const u8 *src,
+                                 const u8 *table);
+asmlinkage void kuz_decrypt_8way(const u8 *dekey, u8 *dst, const u8 *src,
+                                 const u8 *inv_table,
+                                 const u8 *inv_ls_table);
+#endif
+
+static __always_inline void kuz_encrypt_parallel(const u8 *key, u8 *dst,
+                                                  const u8 *src)
+{
+#if defined(CONFIG_X86_64)
+  kuz_encrypt_4way(key, dst, src, (const u8 *)kuz_table);
+#elif defined(CONFIG_ARM64)
+  kuz_encrypt_8way(key, dst, src, (const u8 *)kuz_table);
+#endif
+}
+
+static __always_inline void kuz_decrypt_parallel(const u8 *dekey, u8 *dst,
+                                                  const u8 *src)
+{
+#if defined(CONFIG_X86_64)
+  kuz_decrypt_4way(dekey, dst, src, (const u8 *)kuz_table_inv,
+                   (const u8 *)kuz_table_inv_LS);
+#elif defined(CONFIG_ARM64)
+  kuz_decrypt_8way(dekey, dst, src, (const u8 *)kuz_table_inv,
+                   (const u8 *)kuz_table_inv_LS);
+#endif
+}
+
+#if defined(CONFIG_ARM64)
+static __always_inline void kuz_encrypt_half(const u8 *key, u8 *dst,
+                                              const u8 *src)
+{
+  kuz_encrypt_4way(key, dst, src, (const u8 *)kuz_table);
+}
+
+static __always_inline void kuz_decrypt_half(const u8 *dekey, u8 *dst,
+                                              const u8 *src)
+{
+  kuz_decrypt_4way(dekey, dst, src, (const u8 *)kuz_table_inv,
+                   (const u8 *)kuz_table_inv_LS);
+}
+#endif
 
 static void kuz_l(u8 *out, const u8 *in, const u8 table[16][256 * 16])
 {
@@ -244,11 +294,20 @@ static void kuz_encrypt_blocks(const struct kuz_simd_ctx *ctx, u8 *dst,
                                const u8 *src, unsigned int bytes)
 {
   while (bytes >= KUZ_PAR_SIZE) {
-    kuz_encrypt_4way(ctx->key, dst, src, (const u8 *)kuz_table);
+    kuz_encrypt_parallel(ctx->key, dst, src);
     bytes -= KUZ_PAR_SIZE;
     src += KUZ_PAR_SIZE;
     dst += KUZ_PAR_SIZE;
   }
+
+#if defined(CONFIG_ARM64)
+  if (bytes >= KUZ_HALF_SIZE) {
+    kuz_encrypt_half(ctx->key, dst, src);
+    bytes -= KUZ_HALF_SIZE;
+    src += KUZ_HALF_SIZE;
+    dst += KUZ_HALF_SIZE;
+  }
+#endif
 
   while (bytes) {
     kuz_encrypt_1way(ctx->key, dst, src, (const u8 *)kuz_table);
@@ -265,21 +324,34 @@ static void kuz_decrypt_blocks(const struct kuz_simd_ctx *ctx, u8 *dst,
   u8 out[KUZ_PAR_SIZE] __aligned(16);
 
   while (bytes >= KUZ_PAR_SIZE) {
-    kuz_decrypt_4way(ctx->dekey, dst, src, (const u8 *)kuz_table_inv,
-                     (const u8 *)kuz_table_inv_LS);
+    kuz_decrypt_parallel(ctx->dekey, dst, src);
     kuz_decrypt_final(ctx, dst, KUZ_PAR_SIZE);
     bytes -= KUZ_PAR_SIZE;
     src += KUZ_PAR_SIZE;
     dst += KUZ_PAR_SIZE;
   }
 
+#if defined(CONFIG_ARM64)
+  if (bytes >= KUZ_HALF_SIZE) {
+    kuz_decrypt_half(ctx->dekey, dst, src);
+    kuz_decrypt_final(ctx, dst, KUZ_HALF_SIZE);
+    bytes -= KUZ_HALF_SIZE;
+    src += KUZ_HALF_SIZE;
+    dst += KUZ_HALF_SIZE;
+  }
+#endif
+
   if (!bytes)
     return;
 
   memcpy(in, src, bytes);
+#if defined(CONFIG_ARM64)
+  memset(in + bytes, 0, KUZ_HALF_SIZE - bytes);
+  kuz_decrypt_half(ctx->dekey, out, in);
+#else
   memset(in + bytes, 0, KUZ_PAR_SIZE - bytes);
-  kuz_decrypt_4way(ctx->dekey, out, in, (const u8 *)kuz_table_inv,
-                   (const u8 *)kuz_table_inv_LS);
+  kuz_decrypt_parallel(ctx->dekey, out, in);
+#endif
   kuz_decrypt_final(ctx, out, bytes);
   memcpy(dst, out, bytes);
 }
@@ -338,12 +410,27 @@ static void kuz_ctr_blocks(const struct kuz_simd_ctx *ctx, u8 *dst,
              KUZNYECHIK_BLOCK_SIZE);
       crypto_inc(ctr, KUZNYECHIK_BLOCK_SIZE);
     }
-    kuz_encrypt_4way(ctx->key, stream, counters, (const u8 *)kuz_table);
+    kuz_encrypt_parallel(ctx->key, stream, counters);
     crypto_xor_cpy(dst, src, stream, KUZ_PAR_SIZE);
     bytes -= KUZ_PAR_SIZE;
     src += KUZ_PAR_SIZE;
     dst += KUZ_PAR_SIZE;
   }
+
+#if defined(CONFIG_ARM64)
+  if (bytes >= KUZ_HALF_SIZE) {
+    for (i = 0; i < KUZ_HALF_BLOCKS; i++) {
+      memcpy(counters + i * KUZNYECHIK_BLOCK_SIZE, ctr,
+             KUZNYECHIK_BLOCK_SIZE);
+      crypto_inc(ctr, KUZNYECHIK_BLOCK_SIZE);
+    }
+    kuz_encrypt_half(ctx->key, stream, counters);
+    crypto_xor_cpy(dst, src, stream, KUZ_HALF_SIZE);
+    bytes -= KUZ_HALF_SIZE;
+    src += KUZ_HALF_SIZE;
+    dst += KUZ_HALF_SIZE;
+  }
+#endif
 
   while (bytes) {
     kuz_encrypt_1way(ctx->key, stream, ctr, (const u8 *)kuz_table);
@@ -561,12 +648,26 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
              KUZNYECHIK_BLOCK_SIZE);
       crypto_inc(state->ctr, KUZNYECHIK_BLOCK_SIZE);
     }
-    kuz_encrypt_4way(ctx->key, streams, counters, (const u8 *)kuz_table);
+    kuz_encrypt_parallel(ctx->key, streams, counters);
     crypto_xor_cpy(dst, src, streams, KUZ_PAR_SIZE);
     dst += KUZ_PAR_SIZE;
     src += KUZ_PAR_SIZE;
     len -= KUZ_PAR_SIZE;
   }
+#if defined(CONFIG_ARM64)
+  if (len >= KUZ_HALF_SIZE) {
+    for (i = 0; i < KUZ_HALF_BLOCKS; i++) {
+      memcpy(counters + i * KUZNYECHIK_BLOCK_SIZE, state->ctr,
+             KUZNYECHIK_BLOCK_SIZE);
+      crypto_inc(state->ctr, KUZNYECHIK_BLOCK_SIZE);
+    }
+    kuz_encrypt_half(ctx->key, streams, counters);
+    crypto_xor_cpy(dst, src, streams, KUZ_HALF_SIZE);
+    dst += KUZ_HALF_SIZE;
+    src += KUZ_HALF_SIZE;
+    len -= KUZ_HALF_SIZE;
+  }
+#endif
   while (len >= KUZNYECHIK_BLOCK_SIZE) {
     kuz_encrypt_1way(ctx->key, state->stream, state->ctr,
                      (const u8 *)kuz_table);
