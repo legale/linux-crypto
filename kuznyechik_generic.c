@@ -10,7 +10,9 @@
  */
 
 #include <linux/crypto.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/sched.h>
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #include <linux/unaligned.h>
@@ -33,6 +35,18 @@ static inline void crypto_xor_cpy(u8 *dst, const u8 *src1, const u8 *src2,
 #endif
 
 #define KUZNYECHIK_SUBKEYS_SIZE (16 * 10)
+#if defined(CONFIG_ARM64)
+#define KUZ_BENCH_BLOCKS 8
+#else
+#define KUZ_BENCH_BLOCKS 4
+#endif
+#define KUZ_BENCH_SIZE (KUZ_BENCH_BLOCKS * KUZNYECHIK_BLOCK_SIZE)
+#define KUZ_BENCH_RUNS 3
+#define KUZ_BENCH_CHUNKS 512
+
+static unsigned int bench_ms;
+module_param(bench_ms, uint, 0444);
+MODULE_PARM_DESC(bench_ms, "benchmark duration per run in milliseconds (0 disables)");
 
 struct crypto_kuznyechik_ctx {
 	u8 key[KUZNYECHIK_SUBKEYS_SIZE];
@@ -166,10 +180,9 @@ static void subkey(u8 *out, const u8 *key, unsigned int i)
 	crypto_xor(out+0, test, 16);
 }
 
-static int kuznyechik_set_key(struct crypto_tfm *tfm, const u8 *in_key,
-		unsigned int key_len)
+static int kuznyechik_expand_key(struct crypto_kuznyechik_ctx *ctx,
+		const u8 *in_key, unsigned int key_len)
 {
-	struct crypto_kuznyechik_ctx *ctx = crypto_tfm_ctx(tfm);
 	unsigned int i;
 
 	if (key_len != KUZNYECHIK_KEY_SIZE)
@@ -186,9 +199,15 @@ static int kuznyechik_set_key(struct crypto_tfm *tfm, const u8 *in_key,
 	return 0;
 }
 
-static void kuznyechik_encrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
+static int kuznyechik_set_key(struct crypto_tfm *tfm, const u8 *in_key,
+		unsigned int key_len)
 {
-	const struct crypto_kuznyechik_ctx *ctx = crypto_tfm_ctx(tfm);
+	return kuznyechik_expand_key(crypto_tfm_ctx(tfm), in_key, key_len);
+}
+
+static void kuznyechik_encrypt_ctx(const struct crypto_kuznyechik_ctx *ctx,
+		u8 *out, const u8 *in)
+{
 	u8 temp[KUZNYECHIK_BLOCK_SIZE];
 
 	LSX(temp, ctx->key + 16 * 0, in);
@@ -201,6 +220,11 @@ static void kuznyechik_encrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
 	LSX(temp, ctx->key + 16 * 7, temp);
 	LSX(temp, ctx->key + 16 * 8, temp);
 	crypto_xor_cpy(out, ctx->key + 16 * 9, temp, 16);
+}
+
+static void kuznyechik_encrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
+{
+	kuznyechik_encrypt_ctx(crypto_tfm_ctx(tfm), out, in);
 }
 
 static void kuznyechik_decrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
@@ -220,6 +244,120 @@ static void kuznyechik_decrypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
 	XLiSi(temp, temp, ctx->dekey + 16 * 1);
 	Sinv(out, temp);
 	crypto_xor(out, ctx->key + 16 * 0, 16);
+}
+
+
+static u64 kuz_bench_rate(u64 bytes, u64 ns)
+{
+	if (!ns)
+		return 0;
+	return div64_u64(bytes * NSEC_PER_SEC, ns);
+}
+
+static void kuz_bench_print(const char *name, u64 rate)
+{
+	u64 mib = 1024 * 1024;
+	u64 frac = div64_u64((rate % mib) * 100, mib);
+
+	pr_info("kuznyechik_generic: bench %s %llu.%02llu MiB/s\n",
+		name, div64_u64(rate, mib), frac);
+}
+
+static u64 kuz_bench_once(const struct crypto_kuznyechik_ctx *ctx,
+		const u8 *src, u8 *dst, u64 ns)
+{
+	u64 start = ktime_get_ns();
+	u64 now;
+	u64 bytes = 0;
+	unsigned int i;
+	unsigned int j;
+
+	do {
+		for (j = 0; j < KUZ_BENCH_CHUNKS; j++) {
+			for (i = 0; i < KUZ_BENCH_BLOCKS; i++)
+				kuznyechik_encrypt_ctx(ctx,
+					dst + i * KUZNYECHIK_BLOCK_SIZE,
+					src + i * KUZNYECHIK_BLOCK_SIZE);
+			bytes += KUZ_BENCH_SIZE;
+			barrier();
+		}
+		cond_resched();
+		now = ktime_get_ns();
+	} while (now - start < ns);
+
+	return kuz_bench_rate(bytes, now - start);
+}
+
+static u64 kuz_bench_median3(u64 a, u64 b, u64 c)
+{
+	if (a > b)
+		swap(a, b);
+	if (b > c)
+		swap(b, c);
+	if (a > b)
+		swap(a, b);
+	return b;
+}
+
+static int __init kuz_bench_run(void)
+{
+	static const u8 key[KUZNYECHIK_KEY_SIZE] = {
+		0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+		0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+		0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+	};
+	static const u8 plain[KUZNYECHIK_BLOCK_SIZE] = {
+		0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x00,
+		0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88,
+	};
+	static const u8 cipher[KUZNYECHIK_BLOCK_SIZE] = {
+		0x7f, 0x67, 0x9d, 0x90, 0xbe, 0xbc, 0x24, 0x30,
+		0x5a, 0x46, 0x8d, 0x42, 0xb9, 0xd4, 0xed, 0xcd,
+	};
+	struct crypto_kuznyechik_ctx ctx;
+	u8 src[KUZ_BENCH_SIZE] __aligned(16);
+	u8 out[KUZ_BENCH_SIZE] __aligned(16);
+	u64 rate[KUZ_BENCH_RUNS];
+	u64 ns;
+	unsigned int i;
+	int err;
+
+	if (!bench_ms)
+		return 0;
+	if (bench_ms < 100 || bench_ms > 30000)
+		return -EINVAL;
+
+	err = kuznyechik_expand_key(&ctx, key, sizeof(key));
+	if (err)
+		return err;
+	for (i = 0; i < KUZ_BENCH_BLOCKS; i++)
+		memcpy(src + i * KUZNYECHIK_BLOCK_SIZE, plain, sizeof(plain));
+	kuznyechik_encrypt_ctx(&ctx, out, src);
+	if (crypto_memneq(out, cipher, sizeof(cipher))) {
+		pr_err("kuznyechik_generic: bench self-test failed\n");
+		err = -EBADMSG;
+		goto out;
+	}
+
+	ns = (u64)bench_ms * NSEC_PER_MSEC;
+	(void)kuz_bench_once(&ctx, src, out, 100 * NSEC_PER_MSEC);
+	pr_info("kuznyechik_generic: bench raw encrypt, %u ms x %u, %u-byte bulk\n",
+		bench_ms, KUZ_BENCH_RUNS, KUZ_BENCH_SIZE);
+	for (i = 0; i < KUZ_BENCH_RUNS; i++) {
+		rate[i] = kuz_bench_once(&ctx, src, out, ns);
+		pr_info("kuznyechik_generic: bench run %u\n", i + 1);
+		kuz_bench_print("generic", rate[i]);
+	}
+	kuz_bench_print("median",
+		kuz_bench_median3(rate[0], rate[1], rate[2]));
+	err = 0;
+
+out:
+	memzero_explicit(&ctx, sizeof(ctx));
+	memzero_explicit(src, sizeof(src));
+	memzero_explicit(out, sizeof(out));
+	return err;
 }
 
 static struct crypto_alg kuznyechik_alg = {
@@ -243,6 +381,11 @@ static struct crypto_alg kuznyechik_alg = {
 
 static int __init kuznyechik_init(void)
 {
+	int err;
+
+	err = kuz_bench_run();
+	if (err)
+		return err;
 	return crypto_register_alg(&kuznyechik_alg);
 }
 
