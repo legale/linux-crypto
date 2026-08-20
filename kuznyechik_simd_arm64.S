@@ -1,13 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Eight/four-block ARM64 NEON core for GOST R 34.12-2015 Kuznyechik.
+ * ARM64 NEON core for GOST R 34.12-2015 Kuznyechik.
  *
- * The LSX tables contain 128-bit values and cannot be addressed by NEON
- * tbl/tbx.  Keep eight blocks in NEON, transpose only the lookup bytes,
- * extract eight indices at once, and accumulate 128-bit table entries in
- * NEON.  This mirrors the multi-block/transposed structure used by the
- * in-kernel ARM64 SM4 NEON core without doing one SIMD->GPR transfer per
- * byte and block.
+ * Eight-block forward encryption uses a tableless LS hot path: pi is looked
+ * up with NEON tbl/tbx and L is evaluated in registers as R^16.  The 4/1
+ * block forward fallbacks and inverse transform retain the compact LSX table
+ * implementation.
  */
 
 #include <linux/linkage.h>
@@ -292,8 +290,234 @@ SYM_FUNC_START(kuz_decrypt_4way)
 SYM_FUNC_END(kuz_decrypt_4way)
 
 /*
- * void kuz_encrypt_8way(const u8 *key, u8 *dst, const u8 *src,
- *                       const u8 *table);
+ * Tableless forward LS for eight blocks.
+ *
+ * S is evaluated with the 256-byte pi table resident in NEON registers,
+ * exactly like the ARM64 SM4 NEON S-box.  L is evaluated as R^16 on
+ * byte-sliced state.  The only table accesses in the hot path are fixed
+ * sequential loads; no address depends on cipher state.
+ */
+.macro KUZ_LOAD_PI
+	adrp	x5, .Lkuz_pi
+	add	x5, x5, :lo12:.Lkuz_pi
+	ld1	{v16.16b-v19.16b}, [x5], #64
+	ld1	{v20.16b-v23.16b}, [x5], #64
+	ld1	{v24.16b-v27.16b}, [x5], #64
+	ld1	{v28.16b-v31.16b}, [x5]
+.endm
+
+.macro KUZ_SBOX_ONE reg
+	mov	v8.16b, \reg\().16b
+	tbl	\reg\().16b, {v16.16b-v19.16b}, v8.16b
+	sub	v8.16b, v8.16b, v15.16b
+	tbx	\reg\().16b, {v20.16b-v23.16b}, v8.16b
+	sub	v8.16b, v8.16b, v15.16b
+	tbx	\reg\().16b, {v24.16b-v27.16b}, v8.16b
+	sub	v8.16b, v8.16b, v15.16b
+	tbx	\reg\().16b, {v28.16b-v31.16b}, v8.16b
+.endm
+
+.macro KUZ_SBOX8
+	KUZ_LOAD_PI
+	movi	v15.16b, #64
+	KUZ_SBOX_ONE v0
+	KUZ_SBOX_ONE v1
+	KUZ_SBOX_ONE v2
+	KUZ_SBOX_ONE v3
+	KUZ_SBOX_ONE v4
+	KUZ_SBOX_ONE v5
+	KUZ_SBOX_ONE v6
+	KUZ_SBOX_ONE v7
+.endm
+
+/* v0..v7 blocks -> v0..v15 byte positions, eight bytes per position. */
+.macro KUZ_PACK8
+	trn1	v8.16b, v0.16b, v1.16b
+	trn2	v9.16b, v0.16b, v1.16b
+	trn1	v10.16b, v2.16b, v3.16b
+	trn2	v11.16b, v2.16b, v3.16b
+	trn1	v12.16b, v4.16b, v5.16b
+	trn2	v13.16b, v4.16b, v5.16b
+	trn1	v14.16b, v6.16b, v7.16b
+	trn2	v15.16b, v6.16b, v7.16b
+
+	trn1	v16.8h, v8.8h, v10.8h
+	trn2	v17.8h, v8.8h, v10.8h
+	trn1	v18.8h, v9.8h, v11.8h
+	trn2	v19.8h, v9.8h, v11.8h
+	trn1	v20.8h, v12.8h, v14.8h
+	trn2	v21.8h, v12.8h, v14.8h
+	trn1	v22.8h, v13.8h, v15.8h
+	trn2	v23.8h, v13.8h, v15.8h
+
+	trn1	v24.4s, v16.4s, v20.4s
+	trn2	v25.4s, v16.4s, v20.4s
+	trn1	v26.4s, v17.4s, v21.4s
+	trn2	v27.4s, v17.4s, v21.4s
+	trn1	v28.4s, v18.4s, v22.4s
+	trn2	v29.4s, v18.4s, v22.4s
+	trn1	v30.4s, v19.4s, v23.4s
+	trn2	v31.4s, v19.4s, v23.4s
+
+	mov	v0.d[0], v24.d[0]
+	mov	v1.d[0], v28.d[0]
+	mov	v2.d[0], v26.d[0]
+	mov	v3.d[0], v30.d[0]
+	mov	v4.d[0], v25.d[0]
+	mov	v5.d[0], v29.d[0]
+	mov	v6.d[0], v27.d[0]
+	mov	v7.d[0], v31.d[0]
+	mov	v8.d[0], v24.d[1]
+	mov	v9.d[0], v28.d[1]
+	mov	v10.d[0], v26.d[1]
+	mov	v11.d[0], v30.d[1]
+	mov	v12.d[0], v25.d[1]
+	mov	v13.d[0], v29.d[1]
+	mov	v14.d[0], v27.d[1]
+	mov	v15.d[0], v31.d[1]
+.endm
+
+/* v0..v15 byte positions -> v0..v7 blocks. */
+.macro KUZ_UNPACK8
+	mov	v24.d[0], v0.d[0]
+	mov	v24.d[1], v8.d[0]
+	mov	v25.d[0], v4.d[0]
+	mov	v25.d[1], v12.d[0]
+	mov	v26.d[0], v2.d[0]
+	mov	v26.d[1], v10.d[0]
+	mov	v27.d[0], v6.d[0]
+	mov	v27.d[1], v14.d[0]
+	mov	v28.d[0], v1.d[0]
+	mov	v28.d[1], v9.d[0]
+	mov	v29.d[0], v5.d[0]
+	mov	v29.d[1], v13.d[0]
+	mov	v30.d[0], v3.d[0]
+	mov	v30.d[1], v11.d[0]
+	mov	v31.d[0], v7.d[0]
+	mov	v31.d[1], v15.d[0]
+
+	trn1	v16.4s, v24.4s, v25.4s
+	trn2	v20.4s, v24.4s, v25.4s
+	trn1	v17.4s, v26.4s, v27.4s
+	trn2	v21.4s, v26.4s, v27.4s
+	trn1	v18.4s, v28.4s, v29.4s
+	trn2	v22.4s, v28.4s, v29.4s
+	trn1	v19.4s, v30.4s, v31.4s
+	trn2	v23.4s, v30.4s, v31.4s
+
+	trn1	v8.8h, v16.8h, v17.8h
+	trn2	v10.8h, v16.8h, v17.8h
+	trn1	v9.8h, v18.8h, v19.8h
+	trn2	v11.8h, v18.8h, v19.8h
+	trn1	v12.8h, v20.8h, v21.8h
+	trn2	v14.8h, v20.8h, v21.8h
+	trn1	v13.8h, v22.8h, v23.8h
+	trn2	v15.8h, v22.8h, v23.8h
+
+	trn1	v0.16b, v8.16b, v9.16b
+	trn2	v1.16b, v8.16b, v9.16b
+	trn1	v2.16b, v10.16b, v11.16b
+	trn2	v3.16b, v10.16b, v11.16b
+	trn1	v4.16b, v12.16b, v13.16b
+	trn2	v5.16b, v12.16b, v13.16b
+	trn1	v6.16b, v14.16b, v15.16b
+	trn2	v7.16b, v14.16b, v15.16b
+.endm
+
+/*
+ * GF(2^8), p(x) = x^8 + x^7 + x^6 + x + 1 (0x1c3).
+ * v24..v28: nibble multiplication tables
+ * v29: 0x0f, v30: 0xc3, v16..v19: temporaries.
+ */
+.macro KUZ_MUL_NIB dst, src, lo, hi, tmp
+	ushr	\tmp\().8b, \src\().8b, #4
+	and	\dst\().8b, \src\().8b, v29.8b
+	tbl	\dst\().8b, {\lo\().16b}, \dst\().8b
+	tbl	\tmp\().8b, {\hi\().16b}, \tmp\().8b
+	eor	\dst\().8b, \dst\().8b, \tmp\().8b
+.endm
+
+.macro KUZ_XTIME dst, src, tmp
+	sshr	\tmp\().8b, \src\().8b, #7
+	shl	\dst\().8b, \src\().8b, #1
+	and	\tmp\().8b, \tmp\().8b, v30.8b
+	eor	\dst\().8b, \dst\().8b, \tmp\().8b
+.endm
+
+/* One R step.  The new byte is written over the dropped a15 register. */
+.macro KUZ_R8 a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15
+	/* G = a6 ^ a8 ^ a15, plus C/E/F and 2*F. */
+	eor	\a15\().8b, \a15\().8b, \a6\().8b
+	eor	\a15\().8b, \a15\().8b, \a8\().8b
+	eor	v16.8b, \a2\().8b, \a12\().8b
+	eor	\a15\().8b, \a15\().8b, v16.8b
+	eor	v17.8b, \a4\().8b, \a10\().8b
+	eor	\a15\().8b, \a15\().8b, v17.8b
+	eor	v18.8b, \a5\().8b, \a9\().8b
+	eor	\a15\().8b, \a15\().8b, v18.8b
+
+	/* 195 * (E ^ F).  mul195 low == mul16 high. */
+	eor	v19.8b, v17.8b, v18.8b
+	KUZ_MUL_NIB v19, v19, v25, v28, v17
+	eor	\a15\().8b, \a15\().8b, v19.8b
+
+	KUZ_XTIME v19, v18, v17
+	eor	\a15\().8b, \a15\().8b, v19.8b
+
+	/* 16 * (2*B ^ C ^ D ^ H). */
+	eor	v17.8b, \a1\().8b, \a13\().8b
+	KUZ_XTIME v19, v17, v18
+	eor	v19.8b, v19.8b, v16.8b
+	eor	v17.8b, \a3\().8b, \a11\().8b
+	eor	v19.8b, v19.8b, v17.8b
+	eor	v19.8b, v19.8b, \a7\().8b
+	KUZ_MUL_NIB v19, v19, v24, v25, v17
+	eor	\a15\().8b, \a15\().8b, v19.8b
+
+	/* 148 * (A ^ C ^ 2*H). */
+	eor	v17.8b, \a0\().8b, \a14\().8b
+	eor	v17.8b, v17.8b, v16.8b
+	KUZ_XTIME v19, \a7, v18
+	eor	v17.8b, v17.8b, v19.8b
+	KUZ_MUL_NIB v17, v17, v26, v27, v18
+	eor	\a15\().8b, \a15\().8b, v17.8b
+.endm
+
+.macro KUZ_L8
+	adrp	x5, .Lkuz_lmul
+	add	x5, x5, :lo12:.Lkuz_lmul
+	ld1	{v24.16b-v27.16b}, [x5], #64
+	ldr	q28, [x5]
+	movi	v29.16b, #0x0f
+	movi	v30.16b, #0xc3
+
+	KUZ_R8 v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15
+	KUZ_R8 v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14
+	KUZ_R8 v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13
+	KUZ_R8 v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12
+	KUZ_R8 v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11
+	KUZ_R8 v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10
+	KUZ_R8 v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9
+	KUZ_R8 v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8
+	KUZ_R8 v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7
+	KUZ_R8 v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6
+	KUZ_R8 v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5
+	KUZ_R8 v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4
+	KUZ_R8 v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3
+	KUZ_R8 v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2
+	KUZ_R8 v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1
+	KUZ_R8 v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0
+.endm
+
+.macro KUZ_TRANSFORM8_TABLELESS
+	KUZ_SBOX8
+	KUZ_PACK8
+	KUZ_L8
+	KUZ_UNPACK8
+.endm
+
+/*
+ * void kuz_encrypt_8way(const u8 *key, u8 *dst, const u8 *src);
  */
 SYM_FUNC_START(kuz_encrypt_8way)
 	ldp	q0, q1, [x2]
@@ -313,7 +537,7 @@ SYM_FUNC_START(kuz_encrypt_8way)
 	eor	v5.16b, v5.16b, v16.16b
 	eor	v6.16b, v6.16b, v16.16b
 	eor	v7.16b, v7.16b, v16.16b
-	KUZ_TRANSFORM8 x3
+	KUZ_TRANSFORM8_TABLELESS
 	subs	w7, w7, #1
 	b.ne	.Lkuz_enc_eight_round
 
@@ -345,8 +569,7 @@ SYM_FUNC_END(kuz_encrypt_8way)
 .endm
 
 /*
- * void kuz_ctr_8way(const u8 *key, u8 *dst, const u8 *src, u8 *ctr,
- *                   const u8 *table);
+ * void kuz_ctr_8way(const u8 *key, u8 *dst, const u8 *src, u8 *ctr);
  */
 SYM_FUNC_START(kuz_ctr_8way)
 	ldr	x8, [x3]
@@ -382,7 +605,7 @@ SYM_FUNC_START(kuz_ctr_8way)
 	eor	v5.16b, v5.16b, v16.16b
 	eor	v6.16b, v6.16b, v16.16b
 	eor	v7.16b, v7.16b, v16.16b
-	KUZ_TRANSFORM8 x4
+	KUZ_TRANSFORM8_TABLELESS
 	subs	w7, w7, #1
 	b.ne	.Lkuz_ctr_eight_round
 
@@ -460,3 +683,57 @@ SYM_FUNC_START(kuz_decrypt_8way)
 	stp	q6, q7, [x1, #96]
 	ret
 SYM_FUNC_END(kuz_decrypt_8way)
+
+
+.pushsection .rodata
+.align 4
+.Lkuz_pi:
+	.byte 0xfc, 0xee, 0xdd, 0x11, 0xcf, 0x6e, 0x31, 0x16
+	.byte 0xfb, 0xc4, 0xfa, 0xda, 0x23, 0xc5, 0x04, 0x4d
+	.byte 0xe9, 0x77, 0xf0, 0xdb, 0x93, 0x2e, 0x99, 0xba
+	.byte 0x17, 0x36, 0xf1, 0xbb, 0x14, 0xcd, 0x5f, 0xc1
+	.byte 0xf9, 0x18, 0x65, 0x5a, 0xe2, 0x5c, 0xef, 0x21
+	.byte 0x81, 0x1c, 0x3c, 0x42, 0x8b, 0x01, 0x8e, 0x4f
+	.byte 0x05, 0x84, 0x02, 0xae, 0xe3, 0x6a, 0x8f, 0xa0
+	.byte 0x06, 0x0b, 0xed, 0x98, 0x7f, 0xd4, 0xd3, 0x1f
+	.byte 0xeb, 0x34, 0x2c, 0x51, 0xea, 0xc8, 0x48, 0xab
+	.byte 0xf2, 0x2a, 0x68, 0xa2, 0xfd, 0x3a, 0xce, 0xcc
+	.byte 0xb5, 0x70, 0x0e, 0x56, 0x08, 0x0c, 0x76, 0x12
+	.byte 0xbf, 0x72, 0x13, 0x47, 0x9c, 0xb7, 0x5d, 0x87
+	.byte 0x15, 0xa1, 0x96, 0x29, 0x10, 0x7b, 0x9a, 0xc7
+	.byte 0xf3, 0x91, 0x78, 0x6f, 0x9d, 0x9e, 0xb2, 0xb1
+	.byte 0x32, 0x75, 0x19, 0x3d, 0xff, 0x35, 0x8a, 0x7e
+	.byte 0x6d, 0x54, 0xc6, 0x80, 0xc3, 0xbd, 0x0d, 0x57
+	.byte 0xdf, 0xf5, 0x24, 0xa9, 0x3e, 0xa8, 0x43, 0xc9
+	.byte 0xd7, 0x79, 0xd6, 0xf6, 0x7c, 0x22, 0xb9, 0x03
+	.byte 0xe0, 0x0f, 0xec, 0xde, 0x7a, 0x94, 0xb0, 0xbc
+	.byte 0xdc, 0xe8, 0x28, 0x50, 0x4e, 0x33, 0x0a, 0x4a
+	.byte 0xa7, 0x97, 0x60, 0x73, 0x1e, 0x00, 0x62, 0x44
+	.byte 0x1a, 0xb8, 0x38, 0x82, 0x64, 0x9f, 0x26, 0x41
+	.byte 0xad, 0x45, 0x46, 0x92, 0x27, 0x5e, 0x55, 0x2f
+	.byte 0x8c, 0xa3, 0xa5, 0x7d, 0x69, 0xd5, 0x95, 0x3b
+	.byte 0x07, 0x58, 0xb3, 0x40, 0x86, 0xac, 0x1d, 0xf7
+	.byte 0x30, 0x37, 0x6b, 0xe4, 0x88, 0xd9, 0xe7, 0x89
+	.byte 0xe1, 0x1b, 0x83, 0x49, 0x4c, 0x3f, 0xf8, 0xfe
+	.byte 0x8d, 0x53, 0xaa, 0x90, 0xca, 0xd8, 0x85, 0x61
+	.byte 0x20, 0x71, 0x67, 0xa4, 0x2d, 0x2b, 0x09, 0x5b
+	.byte 0xcb, 0x9b, 0x25, 0xd0, 0xbe, 0xe5, 0x6c, 0x52
+	.byte 0x59, 0xa6, 0x74, 0xd2, 0xe6, 0xf4, 0xb4, 0xc0
+	.byte 0xd1, 0x66, 0xaf, 0xc2, 0x39, 0x4b, 0x63, 0xb6
+
+.align 4
+.Lkuz_lmul:
+	/* mul16 low, mul16 high == mul195 low */
+	.byte 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70
+	.byte 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0
+	.byte 0x00, 0xc3, 0x45, 0x86, 0x8a, 0x49, 0xcf, 0x0c
+	.byte 0xd7, 0x14, 0x92, 0x51, 0x5d, 0x9e, 0x18, 0xdb
+	/* mul148 low/high */
+	.byte 0x00, 0x94, 0xeb, 0x7f, 0x15, 0x81, 0xfe, 0x6a
+	.byte 0x2a, 0xbe, 0xc1, 0x55, 0x3f, 0xab, 0xd4, 0x40
+	.byte 0x00, 0x54, 0xa8, 0xfc, 0x93, 0xc7, 0x3b, 0x6f
+	.byte 0xe5, 0xb1, 0x4d, 0x19, 0x76, 0x22, 0xde, 0x8a
+	/* mul195 high */
+	.byte 0x00, 0x6d, 0xda, 0xb7, 0x77, 0x1a, 0xad, 0xc0
+	.byte 0xee, 0x83, 0x34, 0x59, 0x99, 0xf4, 0x43, 0x2e
+.popsection

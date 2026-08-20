@@ -113,10 +113,8 @@ asmlinkage void kuz_decrypt_4way(const u8 *dekey, u8 *dst, const u8 *src,
                                  const u8 *inv_table,
                                  const u8 *inv_ls_table);
 #if defined(CONFIG_ARM64)
-asmlinkage void kuz_encrypt_8way(const u8 *key, u8 *dst, const u8 *src,
-                                 const u8 *table);
-asmlinkage void kuz_ctr_8way(const u8 *key, u8 *dst, const u8 *src, u8 *ctr,
-                             const u8 *table);
+asmlinkage void kuz_encrypt_8way(const u8 *key, u8 *dst, const u8 *src);
+asmlinkage void kuz_ctr_8way(const u8 *key, u8 *dst, const u8 *src, u8 *ctr);
 asmlinkage void kuz_decrypt_8way(const u8 *dekey, u8 *dst, const u8 *src,
                                  const u8 *inv_table,
                                  const u8 *inv_ls_table);
@@ -128,7 +126,7 @@ static __always_inline void kuz_encrypt_parallel(const u8 *key, u8 *dst,
 #if defined(CONFIG_X86_64)
   kuz_encrypt_4way(key, dst, src, (const u8 *)kuz_table);
 #elif defined(CONFIG_ARM64)
-  kuz_encrypt_8way(key, dst, src, (const u8 *)kuz_table);
+  kuz_encrypt_8way(key, dst, src);
 #endif
 }
 
@@ -359,7 +357,7 @@ static void kuz_ctr_blocks(const struct kuz_simd_ctx *ctx, u8 *dst,
 
   while (bytes >= KUZ_PAR_SIZE) {
 #if defined(CONFIG_ARM64)
-    kuz_ctr_8way(ctx->key, dst, src, ctr, (const u8 *)kuz_table);
+    kuz_ctr_8way(ctx->key, dst, src, ctr);
 #else
     for (i = 0; i < KUZ_PAR_BLOCKS; i++) {
       memcpy(counters + i * KUZNYECHIK_BLOCK_SIZE, ctr,
@@ -601,8 +599,7 @@ static void kuz_ctr_state_xor(const struct kuz_simd_ctx *ctx,
   }
   while (len >= KUZ_PAR_SIZE) {
 #if defined(CONFIG_ARM64)
-    kuz_ctr_8way(ctx->key, dst, src, state->ctr,
-                 (const u8 *)kuz_table);
+    kuz_ctr_8way(ctx->key, dst, src, state->ctr);
 #else
     for (i = 0; i < KUZ_PAR_BLOCKS; i++) {
       memcpy(counters + i * KUZNYECHIK_BLOCK_SIZE, state->ctr,
