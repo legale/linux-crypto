@@ -23,6 +23,10 @@
 #include <crypto/algapi.h>
 #include <crypto/kuznyechik.h>
 
+#if defined(CONFIG_ARM64)
+#include <asm/cputype.h>
+#endif
+
 #include "kuztable.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0)
@@ -42,6 +46,7 @@ static inline void crypto_xor_cpy(u8 *dst, const u8 *src1, const u8 *src2,
 #endif
 #define KUZ_BENCH_SIZE (KUZ_BENCH_BLOCKS * KUZNYECHIK_BLOCK_SIZE)
 #define KUZ_BENCH_RUNS 3
+#define KUZ_GENERIC_VERSION "20260821.1"
 #define KUZ_BENCH_CHUNKS 512
 
 static unsigned int bench_ms;
@@ -258,9 +263,11 @@ static void kuz_bench_print(const char *name, u64 rate)
 {
 	u64 mib = 1024 * 1024;
 	u64 frac = div64_u64((rate % mib) * 100, mib);
+	u64 ns128 = rate ? div64_u64(128ULL * NSEC_PER_SEC * 100, rate) : 0;
 
-	pr_info("kuznyechik_generic: bench %s %llu.%02llu MiB/s\n",
-		name, div64_u64(rate, mib), frac);
+	pr_info("kuznyechik_generic: bench %s %llu.%02llu MiB/s, %llu.%02llu ns/128B\n",
+		name, div64_u64(rate, mib), frac,
+		div64_u64(ns128, 100), ns128 % 100);
 }
 
 static u64 kuz_bench_once(const struct crypto_kuznyechik_ctx *ctx,
@@ -341,9 +348,10 @@ static int __init kuz_bench_run(void)
 	}
 
 	ns = (u64)bench_ms * NSEC_PER_MSEC;
+	migrate_disable();
+	pr_info("kuznyechik_generic: bench duration=%u ms, runs=%u, cpu=%u, bulk=%u bytes\n",
+		bench_ms, KUZ_BENCH_RUNS, raw_smp_processor_id(), KUZ_BENCH_SIZE);
 	(void)kuz_bench_once(&ctx, src, out, 100 * NSEC_PER_MSEC);
-	pr_info("kuznyechik_generic: bench raw encrypt, %u ms x %u, %u-byte bulk\n",
-		bench_ms, KUZ_BENCH_RUNS, KUZ_BENCH_SIZE);
 	for (i = 0; i < KUZ_BENCH_RUNS; i++) {
 		rate[i] = kuz_bench_once(&ctx, src, out, ns);
 		pr_info("kuznyechik_generic: bench run %u\n", i + 1);
@@ -351,6 +359,7 @@ static int __init kuz_bench_run(void)
 	}
 	kuz_bench_print("median",
 		kuz_bench_median3(rate[0], rate[1], rate[2]));
+	migrate_enable();
 	err = 0;
 
 out:
@@ -383,6 +392,17 @@ static int __init kuznyechik_init(void)
 {
 	int err;
 
+	pr_info("kuznyechik_generic: version %s, bulk=%u blocks, path=ttable\n",
+		KUZ_GENERIC_VERSION, KUZ_BENCH_BLOCKS);
+#if defined(CONFIG_ARM64)
+	{
+		u32 midr = read_cpuid_id();
+
+		pr_info("kuznyechik_generic: cpu MIDR=0x%08x implementer=0x%02x part=0x%03x variant=%u revision=%u\n",
+			midr, MIDR_IMPLEMENTOR(midr), MIDR_PARTNUM(midr),
+			MIDR_VARIANT(midr), MIDR_REVISION(midr));
+	}
+#endif
 	err = kuz_bench_run();
 	if (err)
 		return err;
@@ -398,6 +418,7 @@ module_init(kuznyechik_init);
 module_exit(kuznyechik_fini);
 
 MODULE_DESCRIPTION("GOST R 34.12-2015 (Kuznyechik) algorithm");
+MODULE_VERSION(KUZ_GENERIC_VERSION);
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS_CRYPTO("kuznyechik");
 MODULE_ALIAS_CRYPTO("kuznyechik-generic");

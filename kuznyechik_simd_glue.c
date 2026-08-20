@@ -9,6 +9,7 @@
 #include <linux/crypto.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/sched.h>
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #include <linux/unaligned.h>
@@ -20,6 +21,7 @@
 #include <asm/cpufeature.h>
 #include <asm/simd.h>
 #elif defined(CONFIG_ARM64)
+#include <asm/cputype.h>
 #include <asm/neon.h>
 #include <asm/simd.h>
 #else
@@ -82,6 +84,7 @@ static inline void kuz_simd_end(void)
 #endif
 
 #define KUZ_SIMD_DRIVER(name) name "-kuznyechik-simd-" KUZ_SIMD_ARCH
+#define KUZ_SIMD_VERSION "20260821.1"
 
 static unsigned int bench_ms;
 module_param(bench_ms, uint, 0444);
@@ -1062,10 +1065,97 @@ static void kuz_bench_print(const char *name, u64 rate)
 {
   u64 mib = 1024 * 1024;
   u64 frac = div64_u64((rate % mib) * 100, mib);
+  u64 ns128 = rate ? div64_u64(128ULL * NSEC_PER_SEC * 100, rate) : 0;
 
-  pr_info("kuznyechik_simd: bench %-12s %llu.%02llu MiB/s\n",
-          name, div64_u64(rate, mib), frac);
+  pr_info("kuznyechik_simd: bench %-18s %llu.%02llu MiB/s, %llu.%02llu ns/128B\n",
+          name, div64_u64(rate, mib), frac,
+          div64_u64(ns128, 100), ns128 % 100);
 }
+
+#if defined(CONFIG_ARM64)
+static void kuz_bench_ratio(const char *name, u64 a, u64 b)
+{
+  u64 r;
+
+  if (!b)
+    return;
+  r = div64_u64(a * 100, b);
+  pr_info("kuznyechik_simd: bench ratio %-12s %llu.%02llux\n",
+          name, div64_u64(r, 100), r % 100);
+}
+#endif
+
+static u64 kuz_bench_1way(const struct kuz_simd_ctx *ctx, const u8 *src,
+                          u8 *dst, u64 ns)
+{
+  u64 start = ktime_get_ns();
+  u64 now;
+  u64 bytes = 0;
+  unsigned int j;
+
+  do {
+    kuz_simd_begin();
+    for (j = 0; j < KUZ_BENCH_CHUNKS; j++) {
+      kuz_encrypt_1way(ctx->key, dst, src, (const u8 *)kuz_table);
+      bytes += KUZNYECHIK_BLOCK_SIZE;
+    }
+    kuz_simd_end();
+    cond_resched();
+    now = ktime_get_ns();
+  } while (now - start < ns);
+
+  return kuz_bench_rate(bytes, now - start);
+}
+
+#if defined(CONFIG_ARM64)
+static u64 kuz_bench_8x1way(const struct kuz_simd_ctx *ctx, const u8 *src,
+                            u8 *dst, u64 ns)
+{
+  u64 start = ktime_get_ns();
+  u64 now;
+  u64 bytes = 0;
+  unsigned int i;
+  unsigned int j;
+
+  do {
+    kuz_simd_begin();
+    for (j = 0; j < KUZ_BENCH_CHUNKS; j++) {
+      for (i = 0; i < KUZ_PAR_BLOCKS; i++)
+        kuz_encrypt_1way(ctx->key, dst + i * KUZNYECHIK_BLOCK_SIZE,
+                         src + i * KUZNYECHIK_BLOCK_SIZE,
+                         (const u8 *)kuz_table);
+      bytes += KUZ_PAR_SIZE;
+    }
+    kuz_simd_end();
+    cond_resched();
+    now = ktime_get_ns();
+  } while (now - start < ns);
+
+  return kuz_bench_rate(bytes, now - start);
+}
+
+static u64 kuz_bench_4way(const struct kuz_simd_ctx *ctx, const u8 *src,
+                          u8 *dst, u64 ns)
+{
+  u64 start = ktime_get_ns();
+  u64 now;
+  u64 bytes = 0;
+  unsigned int j;
+
+  do {
+    kuz_simd_begin();
+    for (j = 0; j < KUZ_BENCH_CHUNKS; j++) {
+      kuz_encrypt_4way(ctx->key, dst, src, (const u8 *)kuz_table);
+      bytes += KUZ_HALF_SIZE;
+    }
+    kuz_simd_end();
+    cond_resched();
+    now = ktime_get_ns();
+  } while (now - start < ns);
+
+  return kuz_bench_rate(bytes, now - start);
+}
+#endif
 
 static u64 kuz_bench_parallel(const struct kuz_simd_ctx *ctx, const u8 *src,
                               u8 *dst, u64 ns)
@@ -1089,6 +1179,93 @@ static u64 kuz_bench_parallel(const struct kuz_simd_ctx *ctx, const u8 *src,
   return kuz_bench_rate(bytes, now - start);
 }
 
+#if defined(CONFIG_ARM64)
+static u64 kuz_bench_ctr8(const struct kuz_simd_ctx *ctx, const u8 *src,
+                          u8 *dst, u64 ns)
+{
+  u8 ctr[KUZNYECHIK_BLOCK_SIZE] = {};
+  u64 start = ktime_get_ns();
+  u64 now;
+  u64 bytes = 0;
+  unsigned int j;
+
+  do {
+    kuz_simd_begin();
+    for (j = 0; j < KUZ_BENCH_CHUNKS; j++) {
+      kuz_ctr_8way(ctx->key, dst, src, ctr);
+      bytes += KUZ_PAR_SIZE;
+    }
+    kuz_simd_end();
+    cond_resched();
+    now = ktime_get_ns();
+  } while (now - start < ns);
+
+  memzero_explicit(ctr, sizeof(ctr));
+  return kuz_bench_rate(bytes, now - start);
+}
+
+static u64 kuz_bench_omac1(const struct kuz_simd_ctx *ctx, const u8 *src,
+                           u8 *dst, u64 ns)
+{
+  u8 in[KUZNYECHIK_BLOCK_SIZE];
+  u8 state[KUZNYECHIK_BLOCK_SIZE] = {};
+  u64 start = ktime_get_ns();
+  u64 now;
+  u64 bytes = 0;
+  unsigned int j;
+
+  do {
+    kuz_simd_begin();
+    for (j = 0; j < KUZ_BENCH_CHUNKS; j++) {
+      crypto_xor_cpy(in, state, src, KUZNYECHIK_BLOCK_SIZE);
+      kuz_encrypt_1way(ctx->key, state, in, (const u8 *)kuz_table);
+      bytes += KUZNYECHIK_BLOCK_SIZE;
+    }
+    kuz_simd_end();
+    cond_resched();
+    now = ktime_get_ns();
+  } while (now - start < ns);
+
+  memcpy(dst, state, sizeof(state));
+  memzero_explicit(in, sizeof(in));
+  memzero_explicit(state, sizeof(state));
+  return kuz_bench_rate(bytes, now - start);
+}
+
+static u64 kuz_bench_omac8(const struct kuz_simd_ctx *ctx, const u8 *src,
+                           u8 *dst, u64 ns)
+{
+  u8 in[KUZ_PAR_SIZE] __aligned(16);
+  u8 state[KUZ_PAR_SIZE] __aligned(16) = {};
+  u64 start = ktime_get_ns();
+  u64 now;
+  u64 bytes = 0;
+  unsigned int i;
+  unsigned int j;
+
+  do {
+    kuz_simd_begin();
+    for (j = 0; j < KUZ_BENCH_CHUNKS; j++) {
+      for (i = 0; i < KUZ_PAR_BLOCKS; i++)
+        crypto_xor_cpy(in + i * KUZNYECHIK_BLOCK_SIZE,
+                       state + i * KUZNYECHIK_BLOCK_SIZE,
+                       src + i * KUZNYECHIK_BLOCK_SIZE,
+                       KUZNYECHIK_BLOCK_SIZE);
+      kuz_encrypt_8way(ctx->key, state, in);
+      bytes += KUZ_PAR_SIZE;
+    }
+    kuz_simd_end();
+    cond_resched();
+    now = ktime_get_ns();
+  } while (now - start < ns);
+
+  memcpy(dst, state, KUZ_PAR_SIZE);
+  memzero_explicit(in, sizeof(in));
+  memzero_explicit(state, sizeof(state));
+  return kuz_bench_rate(bytes, now - start);
+}
+#endif
+
 static u64 kuz_bench_median3(u64 a, u64 b, u64 c)
 {
   if (a > b)
@@ -1098,6 +1275,24 @@ static u64 kuz_bench_median3(u64 a, u64 b, u64 c)
   if (a > b)
     swap(a, b);
   return b;
+}
+
+typedef u64 (*kuz_bench_fn)(const struct kuz_simd_ctx *ctx, const u8 *src,
+                            u8 *dst, u64 ns);
+
+static u64 kuz_bench_runs(const char *name, kuz_bench_fn fn,
+                          const struct kuz_simd_ctx *ctx, const u8 *src,
+                          u8 *dst, u64 ns)
+{
+  u64 rate[KUZ_BENCH_RUNS];
+  unsigned int i;
+
+  (void)fn(ctx, src, dst, 100 * NSEC_PER_MSEC);
+  for (i = 0; i < KUZ_BENCH_RUNS; i++) {
+    rate[i] = fn(ctx, src, dst, ns);
+    kuz_bench_print(name, rate[i]);
+  }
+  return kuz_bench_median3(rate[0], rate[1], rate[2]);
 }
 
 static int __init kuz_bench_run(void)
@@ -1119,10 +1314,18 @@ static int __init kuz_bench_run(void)
   struct kuz_simd_ctx ctx;
   u8 src[KUZ_PAR_SIZE] __aligned(16);
   u8 out[KUZ_PAR_SIZE] __aligned(16);
-  u64 rate[KUZ_BENCH_RUNS];
   u64 ns;
+  u64 r1;
+  u64 rp;
   unsigned int i;
   int err;
+#if defined(CONFIG_ARM64)
+  u64 r4;
+  u64 r8x1;
+  u64 rctr;
+  u64 romac1;
+  u64 romac8;
+#endif
 
   if (!bench_ms)
     return 0;
@@ -1137,27 +1340,89 @@ static int __init kuz_bench_run(void)
     memcpy(src + i * KUZNYECHIK_BLOCK_SIZE, plain, sizeof(plain));
 
   kuz_simd_begin();
+  kuz_encrypt_1way(ctx.key, out, src, (const u8 *)kuz_table);
+  kuz_simd_end();
+  if (crypto_memneq(out, cipher, sizeof(cipher))) {
+    pr_err("kuznyechik_simd: bench 1way self-test failed\n");
+    err = -EBADMSG;
+    goto out;
+  }
+#if defined(CONFIG_ARM64)
+  kuz_simd_begin();
+  kuz_encrypt_4way(ctx.key, out, src, (const u8 *)kuz_table);
+  kuz_simd_end();
+  for (i = 0; i < KUZ_HALF_BLOCKS; i++) {
+    if (crypto_memneq(out + i * KUZNYECHIK_BLOCK_SIZE,
+                      cipher, sizeof(cipher))) {
+      pr_err("kuznyechik_simd: bench 4way self-test failed at block %u\n", i);
+      err = -EBADMSG;
+      goto out;
+    }
+  }
+#endif
+  kuz_simd_begin();
   kuz_encrypt_parallel(ctx.key, out, src);
   kuz_simd_end();
   for (i = 0; i < KUZ_PAR_BLOCKS; i++) {
     if (crypto_memneq(out + i * KUZNYECHIK_BLOCK_SIZE,
                       cipher, sizeof(cipher))) {
-      pr_err("kuznyechik_simd: bench self-test failed at block %u\n", i);
+      pr_err("kuznyechik_simd: bench bulk self-test failed at block %u\n", i);
       err = -EBADMSG;
       goto out;
     }
   }
 
   ns = (u64)bench_ms * NSEC_PER_MSEC;
-  (void)kuz_bench_parallel(&ctx, src, out, 100 * NSEC_PER_MSEC);
-  pr_info("kuznyechik_simd: bench raw encrypt, %u ms x %u, %u-byte bulk\n",
-          bench_ms, KUZ_BENCH_RUNS, KUZ_PAR_SIZE);
-  for (i = 0; i < KUZ_BENCH_RUNS; i++) {
-    rate[i] = kuz_bench_parallel(&ctx, src, out, ns);
-    pr_info("kuznyechik_simd: bench run %u\n", i + 1);
-    kuz_bench_print("simd", rate[i]);
-  }
-  kuz_bench_print("median", kuz_bench_median3(rate[0], rate[1], rate[2]));
+  migrate_disable();
+  pr_info("kuznyechik_simd: bench duration=%u ms, runs=%u, cpu=%u\n",
+          bench_ms, KUZ_BENCH_RUNS, raw_smp_processor_id());
+#if defined(CONFIG_ARM64)
+  pr_info("kuznyechik_simd: bench paths: 1way=ttable 4way=ttable 8way=tableless ctr8=fused omac8=tableless\n");
+#else
+  pr_info("kuznyechik_simd: bench paths: 1way=ttable bulk=4way-ttable\n");
+#endif
+
+  r1 = kuz_bench_runs("1way-ttable", kuz_bench_1way,
+                      &ctx, src, out, ns);
+#if defined(CONFIG_ARM64)
+  r8x1 = kuz_bench_runs("8x1way-ttable", kuz_bench_8x1way,
+                        &ctx, src, out, ns);
+  r4 = kuz_bench_runs("4way-ttable", kuz_bench_4way,
+                      &ctx, src, out, ns);
+#endif
+  rp = kuz_bench_runs(
+#if defined(CONFIG_ARM64)
+                      "8way-tableless",
+#else
+                      "4way-ttable",
+#endif
+                      kuz_bench_parallel, &ctx, src, out, ns);
+#if defined(CONFIG_ARM64)
+  rctr = kuz_bench_runs("ctr8-fused", kuz_bench_ctr8,
+                        &ctx, src, out, ns);
+  romac1 = kuz_bench_runs("omac-1way", kuz_bench_omac1,
+                          &ctx, src, out, ns);
+  romac8 = kuz_bench_runs("omac8", kuz_bench_omac8,
+                          &ctx, src, out, ns);
+
+  pr_info("kuznyechik_simd: bench medians\n");
+  kuz_bench_print("1way-ttable", r1);
+  kuz_bench_print("8x1way-ttable", r8x1);
+  kuz_bench_print("4way-ttable", r4);
+  kuz_bench_print("8way-tableless", rp);
+  kuz_bench_print("ctr8-fused", rctr);
+  kuz_bench_print("omac-1way", romac1);
+  kuz_bench_print("omac8", romac8);
+  kuz_bench_ratio("8way/8x1", rp, r8x1);
+  kuz_bench_ratio("8way/4way", rp, r4);
+  kuz_bench_ratio("ctr8/8way", rctr, rp);
+  kuz_bench_ratio("omac8/omac1", romac8, romac1);
+#else
+  pr_info("kuznyechik_simd: bench medians\n");
+  kuz_bench_print("1way-ttable", r1);
+  kuz_bench_print("4way-ttable", rp);
+#endif
+  migrate_enable();
   err = 0;
 
 out:
@@ -1192,6 +1457,21 @@ static int __init kuz_simd_init(void)
   if (!kuz_simd_available())
     return -ENODEV;
 
+#if defined(CONFIG_ARM64)
+  {
+    u32 midr = read_cpuid_id();
+
+    pr_info("kuznyechik_simd: version %s, arch=%s, bulk=8-tableless fallback=4-ttable tail=1-ttable\n",
+            KUZ_SIMD_VERSION, KUZ_SIMD_ARCH);
+    pr_info("kuznyechik_simd: cpu MIDR=0x%08x implementer=0x%02x part=0x%03x variant=%u revision=%u\n",
+            midr, MIDR_IMPLEMENTOR(midr), MIDR_PARTNUM(midr),
+            MIDR_VARIANT(midr), MIDR_REVISION(midr));
+  }
+#else
+  pr_info("kuznyechik_simd: version %s, arch=%s, bulk=4-ttable tail=1-ttable\n",
+          KUZ_SIMD_VERSION, KUZ_SIMD_ARCH);
+#endif
+
   err = crypto_register_skciphers(kuz_simd_algs,
                                   ARRAY_SIZE(kuz_simd_algs));
   if (err)
@@ -1222,6 +1502,7 @@ module_init(kuz_simd_init);
 module_exit(kuz_simd_exit);
 
 MODULE_DESCRIPTION("GOST R 34.12-2015 Kuznyechik SIMD cipher");
+MODULE_VERSION(KUZ_SIMD_VERSION);
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS_CRYPTO("ecb(kuznyechik-simd)");
 MODULE_ALIAS_CRYPTO("ctr(kuznyechik-simd)");
