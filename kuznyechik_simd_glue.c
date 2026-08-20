@@ -100,62 +100,8 @@ struct kuz_ctr_state {
   unsigned int used;
 };
 
-#if defined(CONFIG_X86_64)
 asmlinkage void kuz_encrypt_1way(const u8 *key, u8 *dst, const u8 *src,
                                  const u8 *table);
-#elif defined(CONFIG_ARM64)
-static __always_inline void kuz_lsx_1way(u8 *out, const u8 *in,
-                                         const u8 *key, const u8 *table)
-{
-  const u8 *p;
-  u64 lo = 0;
-  u64 hi = 0;
-
-#define KUZ_LSX_LOOKUP(i) do {                                              \
-    p = table + (i) * 256 * KUZNYECHIK_BLOCK_SIZE +                        \
-        (in[i] ^ key[i]) * KUZNYECHIK_BLOCK_SIZE;                          \
-    lo ^= get_unaligned_le64(p);                                            \
-    hi ^= get_unaligned_le64(p + sizeof(lo));                               \
-  } while (0)
-
-  KUZ_LSX_LOOKUP(0);
-  KUZ_LSX_LOOKUP(1);
-  KUZ_LSX_LOOKUP(2);
-  KUZ_LSX_LOOKUP(3);
-  KUZ_LSX_LOOKUP(4);
-  KUZ_LSX_LOOKUP(5);
-  KUZ_LSX_LOOKUP(6);
-  KUZ_LSX_LOOKUP(7);
-  KUZ_LSX_LOOKUP(8);
-  KUZ_LSX_LOOKUP(9);
-  KUZ_LSX_LOOKUP(10);
-  KUZ_LSX_LOOKUP(11);
-  KUZ_LSX_LOOKUP(12);
-  KUZ_LSX_LOOKUP(13);
-  KUZ_LSX_LOOKUP(14);
-  KUZ_LSX_LOOKUP(15);
-
-#undef KUZ_LSX_LOOKUP
-
-  put_unaligned_le64(lo, out);
-  put_unaligned_le64(hi, out + sizeof(lo));
-}
-
-static void kuz_encrypt_1way(const u8 *key, u8 *dst, const u8 *src,
-                             const u8 *table)
-{
-  u8 block[KUZNYECHIK_BLOCK_SIZE];
-  unsigned int round;
-
-  kuz_lsx_1way(block, src, key, table);
-  for (round = 1; round < 9; round++)
-    kuz_lsx_1way(block, block, key + round * KUZNYECHIK_BLOCK_SIZE,
-                 table);
-  crypto_xor_cpy(dst, block, key + 9 * KUZNYECHIK_BLOCK_SIZE,
-                 KUZNYECHIK_BLOCK_SIZE);
-  memzero_explicit(block, sizeof(block));
-}
-#endif
 asmlinkage void kuz_encrypt_4way(const u8 *key, u8 *dst, const u8 *src,
                                  const u8 *table);
 asmlinkage void kuz_decrypt_4way(const u8 *dekey, u8 *dst, const u8 *src,

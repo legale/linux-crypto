@@ -173,6 +173,60 @@
 	KUZ_POS4 \table, v15, 3, 15
 .endm
 
+/* x3: LSX table, x8/x9: packed state bytes, v1: accumulator. */
+.macro KUZ_LOOKUP1_ONE packed, shift, pos
+	ubfx	x10, \packed, #\shift, #8
+	add	x5, x3, #\pos, lsl #12
+	add	x10, x5, x10, lsl #4
+	ldr	q16, [x10]
+	eor	v1.16b, v1.16b, v16.16b
+.endm
+
+.macro KUZ_TRANSFORM1
+	umov	x8, v0.d[0]
+	umov	x9, v0.d[1]
+	movi	v1.16b, #0
+	KUZ_LOOKUP1_ONE x8, 0, 0
+	KUZ_LOOKUP1_ONE x8, 8, 1
+	KUZ_LOOKUP1_ONE x8, 16, 2
+	KUZ_LOOKUP1_ONE x8, 24, 3
+	KUZ_LOOKUP1_ONE x8, 32, 4
+	KUZ_LOOKUP1_ONE x8, 40, 5
+	KUZ_LOOKUP1_ONE x8, 48, 6
+	KUZ_LOOKUP1_ONE x8, 56, 7
+	KUZ_LOOKUP1_ONE x9, 0, 8
+	KUZ_LOOKUP1_ONE x9, 8, 9
+	KUZ_LOOKUP1_ONE x9, 16, 10
+	KUZ_LOOKUP1_ONE x9, 24, 11
+	KUZ_LOOKUP1_ONE x9, 32, 12
+	KUZ_LOOKUP1_ONE x9, 40, 13
+	KUZ_LOOKUP1_ONE x9, 48, 14
+	KUZ_LOOKUP1_ONE x9, 56, 15
+	mov	v0.16b, v1.16b
+.endm
+
+/*
+ * void kuz_encrypt_1way(const u8 *key, u8 *dst, const u8 *src,
+ *                       const u8 *table);
+ */
+SYM_FUNC_START(kuz_encrypt_1way)
+	ldr	q0, [x2]
+	mov	x6, x0
+	mov	w7, #9
+
+.Lkuz_enc_one_round:
+	ldr	q16, [x6], #16
+	eor	v0.16b, v0.16b, v16.16b
+	KUZ_TRANSFORM1
+	subs	w7, w7, #1
+	b.ne	.Lkuz_enc_one_round
+
+	ldr	q16, [x6]
+	eor	v0.16b, v0.16b, v16.16b
+	str	q0, [x1]
+	ret
+SYM_FUNC_END(kuz_encrypt_1way)
+
 /*
  * void kuz_encrypt_4way(const u8 *key, u8 *dst, const u8 *src,
  *                       const u8 *table);
