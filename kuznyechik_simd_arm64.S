@@ -2,9 +2,9 @@
 /*
  * ARM64 NEON core for GOST R 34.12-2015 Kuznyechik.
  *
- * Eight-block forward encryption uses a tableless LS hot path: pi is looked
- * up with NEON tbl/tbx and L is evaluated in registers as R^16.  The 4/1
- * block forward fallbacks and inverse transform retain the compact LSX table
+ * Sixteen-block forward encryption uses a tableless LS hot path: pi is looked
+ * up with NEON tbl/tbx and L is evaluated in registers as R^16.  The 8/4/1
+ * block forward fallbacks and inverse transforms retain the compact LSX table
  * implementation.
  */
 
@@ -515,6 +515,7 @@ SYM_FUNC_END(kuz_decrypt_4way)
 	eor	\a15\().8b, v22.8b, v19.8b
 .endm
 
+
 .macro KUZ_L8
 	adrp	x5, .Lkuz_lmul
 	add	x5, x5, :lo12:.Lkuz_lmul
@@ -617,6 +618,8 @@ SYM_FUNC_START(kuz_l_8way)
 	stp	q6, q7, [x0, #96]
 	ret
 SYM_FUNC_END(kuz_l_8way)
+
+
 
 
 /* x9: big-endian low counter, x8: big-endian high counter. */
@@ -744,6 +747,613 @@ SYM_FUNC_START(kuz_decrypt_8way)
 	stp	q6, q7, [x1, #96]
 	ret
 SYM_FUNC_END(kuz_decrypt_8way)
+
+
+/*
+ * Tableless forward LS for sixteen blocks.
+ * S uses the resident pi table; L evaluates R^16 at full .16b width.
+ */
+
+.macro KUZ_SBOX16_ONE reg, tmp, const64
+	mov	\tmp\().16b, \reg\().16b
+	tbl	\reg\().16b, {v16.16b-v19.16b}, \tmp\().16b
+	sub	\tmp\().16b, \tmp\().16b, \const64\().16b
+	tbx	\reg\().16b, {v20.16b-v23.16b}, \tmp\().16b
+	sub	\tmp\().16b, \tmp\().16b, \const64\().16b
+	tbx	\reg\().16b, {v24.16b-v27.16b}, \tmp\().16b
+	sub	\tmp\().16b, \tmp\().16b, \const64\().16b
+	tbx	\reg\().16b, {v28.16b-v31.16b}, \tmp\().16b
+.endm
+
+.macro KUZ_SBOX16
+	KUZ_LOAD_PI
+	sub	sp, sp, #32
+	stp	q14, q15, [sp]
+	movi	v15.16b, #64
+
+	KUZ_SBOX16_ONE v0, v14, v15
+	KUZ_SBOX16_ONE v1, v14, v15
+	KUZ_SBOX16_ONE v2, v14, v15
+	KUZ_SBOX16_ONE v3, v14, v15
+	KUZ_SBOX16_ONE v4, v14, v15
+	KUZ_SBOX16_ONE v5, v14, v15
+	KUZ_SBOX16_ONE v6, v14, v15
+	KUZ_SBOX16_ONE v7, v14, v15
+	KUZ_SBOX16_ONE v8, v14, v15
+	KUZ_SBOX16_ONE v9, v14, v15
+	KUZ_SBOX16_ONE v10, v14, v15
+	KUZ_SBOX16_ONE v11, v14, v15
+	KUZ_SBOX16_ONE v12, v14, v15
+	KUZ_SBOX16_ONE v13, v14, v15
+
+	ldp	q14, q15, [sp]
+	add	sp, sp, #32
+
+	/* Process v14, v15 using v0, v1 as temporaries */
+	sub	sp, sp, #32
+	stp	q0, q1, [sp]
+	movi	v1.16b, #64
+
+	KUZ_SBOX16_ONE v14, v0, v1
+	KUZ_SBOX16_ONE v15, v0, v1
+
+	ldp	q0, q1, [sp]
+	add	sp, sp, #32
+.endm
+
+/* Transpose 16 blocks (16x16 bytes) in place */
+.macro KUZ_PACK16
+	trn1	v16.16b, v0.16b, v1.16b
+	trn2	v17.16b, v0.16b, v1.16b
+	trn1	v18.16b, v2.16b, v3.16b
+	trn2	v19.16b, v2.16b, v3.16b
+	trn1	v20.16b, v4.16b, v5.16b
+	trn2	v21.16b, v4.16b, v5.16b
+	trn1	v22.16b, v6.16b, v7.16b
+	trn2	v23.16b, v6.16b, v7.16b
+	trn1	v24.16b, v8.16b, v9.16b
+	trn2	v25.16b, v8.16b, v9.16b
+	trn1	v26.16b, v10.16b, v11.16b
+	trn2	v27.16b, v10.16b, v11.16b
+	trn1	v28.16b, v12.16b, v13.16b
+	trn2	v29.16b, v12.16b, v13.16b
+	trn1	v30.16b, v14.16b, v15.16b
+	trn2	v31.16b, v14.16b, v15.16b
+
+	trn1	v0.8h, v16.8h, v18.8h
+	trn2	v2.8h, v16.8h, v18.8h
+	trn1	v1.8h, v17.8h, v19.8h
+	trn2	v3.8h, v17.8h, v19.8h
+	trn1	v4.8h, v20.8h, v22.8h
+	trn2	v6.8h, v20.8h, v22.8h
+	trn1	v5.8h, v21.8h, v23.8h
+	trn2	v7.8h, v21.8h, v23.8h
+	trn1	v8.8h, v24.8h, v26.8h
+	trn2	v10.8h, v24.8h, v26.8h
+	trn1	v9.8h, v25.8h, v27.8h
+	trn2	v11.8h, v25.8h, v27.8h
+	trn1	v12.8h, v28.8h, v30.8h
+	trn2	v14.8h, v28.8h, v30.8h
+	trn1	v13.8h, v29.8h, v31.8h
+	trn2	v15.8h, v29.8h, v31.8h
+
+	trn1	v16.4s, v0.4s, v4.4s
+	trn2	v20.4s, v0.4s, v4.4s
+	trn1	v18.4s, v2.4s, v6.4s
+	trn2	v22.4s, v2.4s, v6.4s
+	trn1	v17.4s, v1.4s, v5.4s
+	trn2	v21.4s, v1.4s, v5.4s
+	trn1	v19.4s, v3.4s, v7.4s
+	trn2	v23.4s, v3.4s, v7.4s
+	trn1	v24.4s, v8.4s, v12.4s
+	trn2	v28.4s, v8.4s, v12.4s
+	trn1	v26.4s, v10.4s, v14.4s
+	trn2	v30.4s, v10.4s, v14.4s
+	trn1	v25.4s, v9.4s, v13.4s
+	trn2	v29.4s, v9.4s, v13.4s
+	trn1	v27.4s, v11.4s, v15.4s
+	trn2	v31.4s, v11.4s, v15.4s
+
+	trn1	v0.2d, v16.2d, v24.2d
+	trn2	v8.2d, v16.2d, v24.2d
+	trn1	v4.2d, v20.2d, v28.2d
+	trn2	v12.2d, v20.2d, v28.2d
+	trn1	v2.2d, v18.2d, v26.2d
+	trn2	v10.2d, v18.2d, v26.2d
+	trn1	v6.2d, v22.2d, v30.2d
+	trn2	v14.2d, v22.2d, v30.2d
+	trn1	v1.2d, v17.2d, v25.2d
+	trn2	v9.2d, v17.2d, v25.2d
+	trn1	v5.2d, v21.2d, v29.2d
+	trn2	v13.2d, v21.2d, v29.2d
+	trn1	v3.2d, v19.2d, v27.2d
+	trn2	v11.2d, v19.2d, v27.2d
+	trn1	v7.2d, v23.2d, v31.2d
+	trn2	v15.2d, v23.2d, v31.2d
+.endm
+
+/*
+ * GF(2^8), p(x) = x^8 + x^7 + x^6 + x + 1 (0x1c3).
+ * Full 16-way width using .16b instructions.
+ */
+
+
+/* One R step (16-way width). */
+.macro KUZ_R16 a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15
+	/* C, E, F, B, A, D and G ^ C ^ E ^ F. */
+	eor	v16.16b, \a2\().16b, \a12\().16b
+	eor	v17.16b, \a4\().16b, \a10\().16b
+	eor	v18.16b, \a5\().16b, \a9\().16b
+	eor	v19.16b, \a1\().16b, \a13\().16b
+	eor	v20.16b, \a0\().16b, \a14\().16b
+	eor	v21.16b, \a3\().16b, \a11\().16b
+	eor	v22.16b, \a15\().16b, \a6\().16b
+	eor	v23.16b, v17.16b, v18.16b
+	eor	v22.16b, v22.16b, \a8\().16b
+	eor	v22.16b, v22.16b, v16.16b
+	eor	v22.16b, v22.16b, v23.16b
+
+	/* Start 195 * (E ^ F), then fill tbl latency with 2*F and 2*B. */
+	ushr	v31.16b, v23.16b, #4
+	and	v23.16b, v23.16b, v29.16b
+	tbl	v23.16b, {v25.16b}, v23.16b
+
+	sshr	v17.16b, v18.16b, #7
+	shl	v18.16b, v18.16b, #1
+	and	v17.16b, v17.16b, v30.16b
+	eor	v18.16b, v18.16b, v17.16b
+
+	sshr	v17.16b, v19.16b, #7
+	shl	v19.16b, v19.16b, #1
+	and	v17.16b, v17.16b, v30.16b
+	eor	v19.16b, v19.16b, v17.16b
+
+	tbl	v31.16b, {v28.16b}, v31.16b
+
+	/* Prepare the 16 * branch while the second 195 lookup completes. */
+	eor	v19.16b, v19.16b, v16.16b
+	eor	v19.16b, v19.16b, v21.16b
+	eor	v19.16b, v19.16b, \a7\().16b
+	eor	v23.16b, v23.16b, v31.16b
+
+	ushr	v31.16b, v19.16b, #4
+	and	v19.16b, v19.16b, v29.16b
+	tbl	v19.16b, {v24.16b}, v19.16b
+
+	/* Prepare 148 * (A ^ C ^ 2*H) while the 16 lookup is in flight. */
+	sshr	v17.16b, \a7\().16b, #7
+	shl	v21.16b, \a7\().16b, #1
+	and	v17.16b, v17.16b, v30.16b
+	eor	v21.16b, v21.16b, v17.16b
+	eor	v20.16b, v20.16b, v16.16b
+	eor	v20.16b, v20.16b, v21.16b
+	eor	v18.16b, v18.16b, v23.16b
+
+	tbl	v31.16b, {v25.16b}, v31.16b
+	eor	v19.16b, v19.16b, v31.16b
+
+	/* 148 * branch. */
+	ushr	v31.16b, v20.16b, #4
+	and	v20.16b, v20.16b, v29.16b
+	tbl	v20.16b, {v26.16b}, v20.16b
+	eor	v22.16b, v22.16b, v18.16b
+	tbl	v31.16b, {v27.16b}, v31.16b
+	eor	v20.16b, v20.16b, v31.16b
+
+	/* Balanced final reduction, then overwrite the dropped byte position. */
+	eor	v19.16b, v19.16b, v20.16b
+	eor	\a15\().16b, v22.16b, v19.16b
+.endm
+
+.macro KUZ_L16
+	adrp	x5, .Lkuz_lmul
+	add	x5, x5, :lo12:.Lkuz_lmul
+	ld1	{v24.16b-v27.16b}, [x5], #64
+	ldr	q28, [x5]
+	movi	v29.16b, #0x0f
+	movi	v30.16b, #0xc3
+
+	KUZ_R16 v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15
+	KUZ_R16 v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14
+	KUZ_R16 v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13
+	KUZ_R16 v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12
+	KUZ_R16 v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11
+	KUZ_R16 v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10
+	KUZ_R16 v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9
+	KUZ_R16 v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7, v8
+	KUZ_R16 v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6, v7
+	KUZ_R16 v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5, v6
+	KUZ_R16 v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4, v5
+	KUZ_R16 v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3, v4
+	KUZ_R16 v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2, v3
+	KUZ_R16 v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1, v2
+	KUZ_R16 v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0, v1
+	KUZ_R16 v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0
+.endm
+
+.macro KUZ_TRANSFORM16_TABLELESS
+	KUZ_SBOX16
+	KUZ_PACK16
+	KUZ_L16
+	KUZ_PACK16 /* 16x16 trn unpacking is identical */
+.endm
+
+/*
+ * void kuz_encrypt_16way(const u8 *key, u8 *dst, const u8 *src);
+ */
+SYM_FUNC_START(kuz_encrypt_16way)
+	ldp	q0, q1, [x2]
+	ldp	q2, q3, [x2, #32]
+	ldp	q4, q5, [x2, #64]
+	ldp	q6, q7, [x2, #96]
+	ldp	q8, q9, [x2, #128]
+	ldp	q10, q11, [x2, #160]
+	ldp	q12, q13, [x2, #192]
+	ldp	q14, q15, [x2, #224]
+	mov	x6, x0
+	mov	w7, #9
+
+.Lkuz_enc_sixteen_round:
+	ldr	q16, [x6], #16
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+	eor	v8.16b, v8.16b, v16.16b
+	eor	v9.16b, v9.16b, v16.16b
+	eor	v10.16b, v10.16b, v16.16b
+	eor	v11.16b, v11.16b, v16.16b
+	eor	v12.16b, v12.16b, v16.16b
+	eor	v13.16b, v13.16b, v16.16b
+	eor	v14.16b, v14.16b, v16.16b
+	eor	v15.16b, v15.16b, v16.16b
+	KUZ_TRANSFORM16_TABLELESS
+	subs	w7, w7, #1
+	b.ne	.Lkuz_enc_sixteen_round
+
+	ldr	q16, [x6]
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+	eor	v8.16b, v8.16b, v16.16b
+	eor	v9.16b, v9.16b, v16.16b
+	eor	v10.16b, v10.16b, v16.16b
+	eor	v11.16b, v11.16b, v16.16b
+	eor	v12.16b, v12.16b, v16.16b
+	eor	v13.16b, v13.16b, v16.16b
+	eor	v14.16b, v14.16b, v16.16b
+	eor	v15.16b, v15.16b, v16.16b
+
+	stp	q0, q1, [x1]
+	stp	q2, q3, [x1, #32]
+	stp	q4, q5, [x1, #64]
+	stp	q6, q7, [x1, #96]
+	stp	q8, q9, [x1, #128]
+	stp	q10, q11, [x1, #160]
+	stp	q12, q13, [x1, #192]
+	stp	q14, q15, [x1, #224]
+	ret
+SYM_FUNC_END(kuz_encrypt_16way)
+
+/* Benchmark-only primitives */
+SYM_FUNC_START(kuz_sbox_16way)
+	ldp	q0, q1, [x1]
+	ldp	q2, q3, [x1, #32]
+	ldp	q4, q5, [x1, #64]
+	ldp	q6, q7, [x1, #96]
+	ldp	q8, q9, [x1, #128]
+	ldp	q10, q11, [x1, #160]
+	ldp	q12, q13, [x1, #192]
+	ldp	q14, q15, [x1, #224]
+	KUZ_SBOX16
+	stp	q0, q1, [x0]
+	stp	q2, q3, [x0, #32]
+	stp	q4, q5, [x0, #64]
+	stp	q6, q7, [x0, #96]
+	stp	q8, q9, [x0, #128]
+	stp	q10, q11, [x0, #160]
+	stp	q12, q13, [x0, #192]
+	stp	q14, q15, [x0, #224]
+	ret
+SYM_FUNC_END(kuz_sbox_16way)
+
+SYM_FUNC_START(kuz_l_16way)
+	ldp	q0, q1, [x1]
+	ldp	q2, q3, [x1, #32]
+	ldp	q4, q5, [x1, #64]
+	ldp	q6, q7, [x1, #96]
+	ldp	q8, q9, [x1, #128]
+	ldp	q10, q11, [x1, #160]
+	ldp	q12, q13, [x1, #192]
+	ldp	q14, q15, [x1, #224]
+	KUZ_PACK16
+	KUZ_L16
+	KUZ_PACK16
+	stp	q0, q1, [x0]
+	stp	q2, q3, [x0, #32]
+	stp	q4, q5, [x0, #64]
+	stp	q6, q7, [x0, #96]
+	stp	q8, q9, [x0, #128]
+	stp	q10, q11, [x0, #160]
+	stp	q12, q13, [x0, #192]
+	stp	q14, q15, [x0, #224]
+	ret
+SYM_FUNC_END(kuz_l_16way)
+
+
+/*
+ * void kuz_ctr_16way(const u8 *key, u8 *dst, const u8 *src, u8 *ctr);
+ */
+SYM_FUNC_START(kuz_ctr_16way)
+	ldr	x8, [x3]
+	ldr	x9, [x3, #8]
+	rev	x8, x8
+	rev	x9, x9
+
+	KUZ_CTR_BLOCK 0, 0
+	KUZ_CTR_BLOCK 1, 1
+	KUZ_CTR_BLOCK 2, 2
+	KUZ_CTR_BLOCK 3, 3
+	KUZ_CTR_BLOCK 4, 4
+	KUZ_CTR_BLOCK 5, 5
+	KUZ_CTR_BLOCK 6, 6
+	KUZ_CTR_BLOCK 7, 7
+	KUZ_CTR_BLOCK 8, 8
+	KUZ_CTR_BLOCK 9, 9
+	KUZ_CTR_BLOCK 10, 10
+	KUZ_CTR_BLOCK 11, 11
+	KUZ_CTR_BLOCK 12, 12
+	KUZ_CTR_BLOCK 13, 13
+	KUZ_CTR_BLOCK 14, 14
+	KUZ_CTR_BLOCK 15, 15
+
+	adds	x10, x9, #16
+	adc	x11, x8, xzr
+	rev	x10, x10
+	rev	x11, x11
+	str	x11, [x3]
+	str	x10, [x3, #8]
+
+	mov	x6, x0
+	mov	w7, #9
+.Lkuz_ctr_sixteen_round:
+	ldr	q16, [x6], #16
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+	eor	v8.16b, v8.16b, v16.16b
+	eor	v9.16b, v9.16b, v16.16b
+	eor	v10.16b, v10.16b, v16.16b
+	eor	v11.16b, v11.16b, v16.16b
+	eor	v12.16b, v12.16b, v16.16b
+	eor	v13.16b, v13.16b, v16.16b
+	eor	v14.16b, v14.16b, v16.16b
+	eor	v15.16b, v15.16b, v16.16b
+	KUZ_TRANSFORM16_TABLELESS
+	subs	w7, w7, #1
+	b.ne	.Lkuz_ctr_sixteen_round
+
+	ldr	q16, [x6]
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+	eor	v8.16b, v8.16b, v16.16b
+	eor	v9.16b, v9.16b, v16.16b
+	eor	v10.16b, v10.16b, v16.16b
+	eor	v11.16b, v11.16b, v16.16b
+	eor	v12.16b, v12.16b, v16.16b
+	eor	v13.16b, v13.16b, v16.16b
+	eor	v14.16b, v14.16b, v16.16b
+	eor	v15.16b, v15.16b, v16.16b
+
+	ldp	q16, q17, [x2]
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v17.16b
+	stp	q0, q1, [x1]
+
+	ldp	q16, q17, [x2, #32]
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v17.16b
+	stp	q2, q3, [x1, #32]
+
+	ldp	q16, q17, [x2, #64]
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v17.16b
+	stp	q4, q5, [x1, #64]
+
+	ldp	q16, q17, [x2, #96]
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v17.16b
+	stp	q6, q7, [x1, #96]
+
+	ldp	q16, q17, [x2, #128]
+	eor	v8.16b, v8.16b, v16.16b
+	eor	v9.16b, v9.16b, v17.16b
+	stp	q8, q9, [x1, #128]
+
+	ldp	q16, q17, [x2, #160]
+	eor	v10.16b, v10.16b, v16.16b
+	eor	v11.16b, v11.16b, v17.16b
+	stp	q10, q11, [x1, #160]
+
+	ldp	q16, q17, [x2, #192]
+	eor	v12.16b, v12.16b, v16.16b
+	eor	v13.16b, v13.16b, v17.16b
+	stp	q12, q13, [x1, #192]
+
+	ldp	q16, q17, [x2, #224]
+	eor	v14.16b, v14.16b, v16.16b
+	eor	v15.16b, v15.16b, v17.16b
+	stp	q14, q15, [x1, #224]
+	ret
+SYM_FUNC_END(kuz_ctr_16way)
+
+.macro KUZ_LOOKUP16_ONE dst, shift, reg_val
+	ubfx	x10, \reg_val, #\shift, #8
+	add	x10, x5, x10, lsl #4
+	ldr	q16, [x10]
+	eor	\dst\().16b, \dst\().16b, v16.16b
+.endm
+
+.macro KUZ_POS16 table, sp_offset, pos
+	ldp	x8, x9, [sp, #\sp_offset]
+	add	x5, \table, #\pos, lsl #12
+	KUZ_LOOKUP16_ONE v0, 0, x8
+	KUZ_LOOKUP16_ONE v1, 8, x8
+	KUZ_LOOKUP16_ONE v2, 16, x8
+	KUZ_LOOKUP16_ONE v3, 24, x8
+	KUZ_LOOKUP16_ONE v4, 32, x8
+	KUZ_LOOKUP16_ONE v5, 40, x8
+	KUZ_LOOKUP16_ONE v6, 48, x8
+	KUZ_LOOKUP16_ONE v7, 56, x8
+	KUZ_LOOKUP16_ONE v8, 0, x9
+	KUZ_LOOKUP16_ONE v9, 8, x9
+	KUZ_LOOKUP16_ONE v10, 16, x9
+	KUZ_LOOKUP16_ONE v11, 24, x9
+	KUZ_LOOKUP16_ONE v12, 32, x9
+	KUZ_LOOKUP16_ONE v13, 40, x9
+	KUZ_LOOKUP16_ONE v14, 48, x9
+	KUZ_LOOKUP16_ONE v15, 56, x9
+.endm
+
+.macro KUZ_TRANSFORM16 table
+	KUZ_PACK16
+
+	sub	sp, sp, #256
+	stp	q0, q1, [sp]
+	stp	q2, q3, [sp, #32]
+	stp	q4, q5, [sp, #64]
+	stp	q6, q7, [sp, #96]
+	stp	q8, q9, [sp, #128]
+	stp	q10, q11, [sp, #160]
+	stp	q12, q13, [sp, #192]
+	stp	q14, q15, [sp, #224]
+
+	movi	v0.16b, #0
+	movi	v1.16b, #0
+	movi	v2.16b, #0
+	movi	v3.16b, #0
+	movi	v4.16b, #0
+	movi	v5.16b, #0
+	movi	v6.16b, #0
+	movi	v7.16b, #0
+	movi	v8.16b, #0
+	movi	v9.16b, #0
+	movi	v10.16b, #0
+	movi	v11.16b, #0
+	movi	v12.16b, #0
+	movi	v13.16b, #0
+	movi	v14.16b, #0
+	movi	v15.16b, #0
+
+	KUZ_POS16 \table, 0, 0
+	KUZ_POS16 \table, 16, 1
+	KUZ_POS16 \table, 32, 2
+	KUZ_POS16 \table, 48, 3
+	KUZ_POS16 \table, 64, 4
+	KUZ_POS16 \table, 80, 5
+	KUZ_POS16 \table, 96, 6
+	KUZ_POS16 \table, 112, 7
+	KUZ_POS16 \table, 128, 8
+	KUZ_POS16 \table, 144, 9
+	KUZ_POS16 \table, 160, 10
+	KUZ_POS16 \table, 176, 11
+	KUZ_POS16 \table, 192, 12
+	KUZ_POS16 \table, 208, 13
+	KUZ_POS16 \table, 224, 14
+	KUZ_POS16 \table, 240, 15
+
+	add	sp, sp, #256
+.endm
+
+/*
+ * void kuz_decrypt_16way(const u8 *dekey, u8 *dst, const u8 *src,
+ *                        const u8 *inv_table, const u8 *inv_ls_table);
+ */
+SYM_FUNC_START(kuz_decrypt_16way)
+	ldp	q0, q1, [x2]
+	ldp	q2, q3, [x2, #32]
+	ldp	q4, q5, [x2, #64]
+	ldp	q6, q7, [x2, #96]
+	ldp	q8, q9, [x2, #128]
+	ldp	q10, q11, [x2, #160]
+	ldp	q12, q13, [x2, #192]
+	ldp	q14, q15, [x2, #224]
+
+	KUZ_TRANSFORM16 x3
+	ldr	q16, [x0, #144]
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+	eor	v8.16b, v8.16b, v16.16b
+	eor	v9.16b, v9.16b, v16.16b
+	eor	v10.16b, v10.16b, v16.16b
+	eor	v11.16b, v11.16b, v16.16b
+	eor	v12.16b, v12.16b, v16.16b
+	eor	v13.16b, v13.16b, v16.16b
+	eor	v14.16b, v14.16b, v16.16b
+	eor	v15.16b, v15.16b, v16.16b
+
+	mov	x3, x4
+	add	x6, x0, #128
+	mov	w7, #8
+
+.Lkuz_dec_sixteen_round:
+	KUZ_TRANSFORM16 x3
+	ldr	q16, [x6], #-16
+	eor	v0.16b, v0.16b, v16.16b
+	eor	v1.16b, v1.16b, v16.16b
+	eor	v2.16b, v2.16b, v16.16b
+	eor	v3.16b, v3.16b, v16.16b
+	eor	v4.16b, v4.16b, v16.16b
+	eor	v5.16b, v5.16b, v16.16b
+	eor	v6.16b, v6.16b, v16.16b
+	eor	v7.16b, v7.16b, v16.16b
+	eor	v8.16b, v8.16b, v16.16b
+	eor	v9.16b, v9.16b, v16.16b
+	eor	v10.16b, v10.16b, v16.16b
+	eor	v11.16b, v11.16b, v16.16b
+	eor	v12.16b, v12.16b, v16.16b
+	eor	v13.16b, v13.16b, v16.16b
+	eor	v14.16b, v14.16b, v16.16b
+	eor	v15.16b, v15.16b, v16.16b
+	subs	w7, w7, #1
+	b.ne	.Lkuz_dec_sixteen_round
+
+	stp	q0, q1, [x1]
+	stp	q2, q3, [x1, #32]
+	stp	q4, q5, [x1, #64]
+	stp	q6, q7, [x1, #96]
+	stp	q8, q9, [x1, #128]
+	stp	q10, q11, [x1, #160]
+	stp	q12, q13, [x1, #192]
+	stp	q14, q15, [x1, #224]
+	ret
+SYM_FUNC_END(kuz_decrypt_16way)
 
 
 .pushsection .rodata
