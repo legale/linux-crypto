@@ -754,9 +754,9 @@ SYM_FUNC_END(kuz_decrypt_8way)
  * S uses the resident pi table; L evaluates R^16 at full .16b width.
  */
 
-.macro KUZ_SBOX16_GROUP r0, r1, r2, r3, r4, r5, r6, r7
-	adrp	x5, .Lkuz_pi
-	add	x5, x5, :lo12:.Lkuz_pi
+.macro KUZ_SBOX16_GROUP table, r0, r1, r2, r3, r4, r5, r6, r7
+	adrp	x5, \table
+	add	x5, x5, :lo12:\table
 	movi	v28.16b, #64
 
 	ld1	{v24.16b-v27.16b}, [x5], #64
@@ -834,8 +834,13 @@ SYM_FUNC_END(kuz_decrypt_8way)
 .endm
 
 .macro KUZ_SBOX16
-	KUZ_SBOX16_GROUP v0, v1, v2, v3, v4, v5, v6, v7
-	KUZ_SBOX16_GROUP v8, v9, v10, v11, v12, v13, v14, v15
+	KUZ_SBOX16_GROUP .Lkuz_pi, v0, v1, v2, v3, v4, v5, v6, v7
+	KUZ_SBOX16_GROUP .Lkuz_pi, v8, v9, v10, v11, v12, v13, v14, v15
+.endm
+
+.macro KUZ_SINV16
+	KUZ_SBOX16_GROUP .Lkuz_pi_inv, v0, v1, v2, v3, v4, v5, v6, v7
+	KUZ_SBOX16_GROUP .Lkuz_pi_inv, v8, v9, v10, v11, v12, v13, v14, v15
 .endm
 
 /* Transpose 16 blocks (16x16 bytes) in place */
@@ -1008,6 +1013,35 @@ SYM_FUNC_END(kuz_decrypt_8way)
 	KUZ_R16 v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v0
 .endm
 
+/* L^-1 = R^-16.  The R coefficients are symmetric and c15 == 1, so the
+ * inverse step is the same arithmetic with the logical byte order reversed.
+ */
+.macro KUZ_LINV16
+	adrp	x5, .Lkuz_lmul
+	add	x5, x5, :lo12:.Lkuz_lmul
+	ld1	{v24.16b-v27.16b}, [x5], #64
+	ldr	q28, [x5]
+	movi	v29.16b, #0x0f
+	movi	v30.16b, #0xc3
+
+	KUZ_R16 v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0
+	KUZ_R16 v0, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1
+	KUZ_R16 v1, v0, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2
+	KUZ_R16 v2, v1, v0, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3
+	KUZ_R16 v3, v2, v1, v0, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4
+	KUZ_R16 v4, v3, v2, v1, v0, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5
+	KUZ_R16 v5, v4, v3, v2, v1, v0, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6
+	KUZ_R16 v6, v5, v4, v3, v2, v1, v0, v15, v14, v13, v12, v11, v10, v9, v8, v7
+	KUZ_R16 v7, v6, v5, v4, v3, v2, v1, v0, v15, v14, v13, v12, v11, v10, v9, v8
+	KUZ_R16 v8, v7, v6, v5, v4, v3, v2, v1, v0, v15, v14, v13, v12, v11, v10, v9
+	KUZ_R16 v9, v8, v7, v6, v5, v4, v3, v2, v1, v0, v15, v14, v13, v12, v11, v10
+	KUZ_R16 v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0, v15, v14, v13, v12, v11
+	KUZ_R16 v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0, v15, v14, v13, v12
+	KUZ_R16 v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0, v15, v14, v13
+	KUZ_R16 v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0, v15, v14
+	KUZ_R16 v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0, v15
+.endm
+
 .macro KUZ_TRANSFORM16_TABLELESS
 	KUZ_SBOX16
 	KUZ_PACK16
@@ -1125,6 +1159,50 @@ SYM_FUNC_START(kuz_l_16way)
 	stp	q14, q15, [x0, #224]
 	ret
 SYM_FUNC_END(kuz_l_16way)
+
+SYM_FUNC_START(kuz_sinv_16way)
+	ldp	q0, q1, [x1]
+	ldp	q2, q3, [x1, #32]
+	ldp	q4, q5, [x1, #64]
+	ldp	q6, q7, [x1, #96]
+	ldp	q8, q9, [x1, #128]
+	ldp	q10, q11, [x1, #160]
+	ldp	q12, q13, [x1, #192]
+	ldp	q14, q15, [x1, #224]
+	KUZ_SINV16
+	stp	q0, q1, [x0]
+	stp	q2, q3, [x0, #32]
+	stp	q4, q5, [x0, #64]
+	stp	q6, q7, [x0, #96]
+	stp	q8, q9, [x0, #128]
+	stp	q10, q11, [x0, #160]
+	stp	q12, q13, [x0, #192]
+	stp	q14, q15, [x0, #224]
+	ret
+SYM_FUNC_END(kuz_sinv_16way)
+
+SYM_FUNC_START(kuz_linv_16way)
+	ldp	q0, q1, [x1]
+	ldp	q2, q3, [x1, #32]
+	ldp	q4, q5, [x1, #64]
+	ldp	q6, q7, [x1, #96]
+	ldp	q8, q9, [x1, #128]
+	ldp	q10, q11, [x1, #160]
+	ldp	q12, q13, [x1, #192]
+	ldp	q14, q15, [x1, #224]
+	KUZ_PACK16
+	KUZ_LINV16
+	KUZ_PACK16
+	stp	q0, q1, [x0]
+	stp	q2, q3, [x0, #32]
+	stp	q4, q5, [x0, #64]
+	stp	q6, q7, [x0, #96]
+	stp	q8, q9, [x0, #128]
+	stp	q10, q11, [x0, #160]
+	stp	q12, q13, [x0, #192]
+	stp	q14, q15, [x0, #224]
+	ret
+SYM_FUNC_END(kuz_linv_16way)
 
 
 /*
@@ -1244,6 +1322,71 @@ SYM_FUNC_START(kuz_ctr_16way)
 	ret
 SYM_FUNC_END(kuz_ctr_16way)
 
+.macro KUZ_XOR16 key
+	eor	v0.16b, v0.16b, \key\().16b
+	eor	v1.16b, v1.16b, \key\().16b
+	eor	v2.16b, v2.16b, \key\().16b
+	eor	v3.16b, v3.16b, \key\().16b
+	eor	v4.16b, v4.16b, \key\().16b
+	eor	v5.16b, v5.16b, \key\().16b
+	eor	v6.16b, v6.16b, \key\().16b
+	eor	v7.16b, v7.16b, \key\().16b
+	eor	v8.16b, v8.16b, \key\().16b
+	eor	v9.16b, v9.16b, \key\().16b
+	eor	v10.16b, v10.16b, \key\().16b
+	eor	v11.16b, v11.16b, \key\().16b
+	eor	v12.16b, v12.16b, \key\().16b
+	eor	v13.16b, v13.16b, \key\().16b
+	eor	v14.16b, v14.16b, \key\().16b
+	eor	v15.16b, v15.16b, \key\().16b
+.endm
+
+/*
+ * void kuz_decrypt_16way(const u8 *dekey, u8 *dst, const u8 *src);
+ *
+ * Returns the state before the final Sinv ^ key0 step, matching the
+ * existing decrypt glue.  The whole inverse core is register-only:
+ * Linv(ciphertext) ^ dekey9, then eight Linv(Sinv(state)) ^ dekey rounds.
+ */
+SYM_FUNC_START(kuz_decrypt_16way)
+	ldp	q0, q1, [x2]
+	ldp	q2, q3, [x2, #32]
+	ldp	q4, q5, [x2, #64]
+	ldp	q6, q7, [x2, #96]
+	ldp	q8, q9, [x2, #128]
+	ldp	q10, q11, [x2, #160]
+	ldp	q12, q13, [x2, #192]
+	ldp	q14, q15, [x2, #224]
+
+	KUZ_PACK16
+	KUZ_LINV16
+	KUZ_PACK16
+	ldr	q16, [x0, #144]
+	KUZ_XOR16 v16
+
+	add	x6, x0, #128
+	mov	w7, #8
+.Lkuz_dec_sixteen_tableless_round:
+	KUZ_SINV16
+	KUZ_PACK16
+	KUZ_LINV16
+	KUZ_PACK16
+	ldr	q16, [x6], #-16
+	KUZ_XOR16 v16
+	subs	w7, w7, #1
+	b.ne	.Lkuz_dec_sixteen_tableless_round
+
+	stp	q0, q1, [x1]
+	stp	q2, q3, [x1, #32]
+	stp	q4, q5, [x1, #64]
+	stp	q6, q7, [x1, #96]
+	stp	q8, q9, [x1, #128]
+	stp	q10, q11, [x1, #160]
+	stp	q12, q13, [x1, #192]
+	stp	q14, q15, [x1, #224]
+	ret
+SYM_FUNC_END(kuz_decrypt_16way)
+
 .macro KUZ_LOOKUP16_ONE dst, shift, reg_val
 	ubfx	x10, \reg_val, #\shift, #8
 	add	x10, x5, x10, lsl #4
@@ -1323,10 +1466,9 @@ SYM_FUNC_END(kuz_ctr_16way)
 .endm
 
 /*
- * void kuz_decrypt_16way(const u8 *dekey, u8 *dst, const u8 *src,
- *                        const u8 *inv_table, const u8 *inv_ls_table);
+ * Reference T-table decrypt16 kept for benchmark comparison.
  */
-SYM_FUNC_START(kuz_decrypt_16way)
+SYM_FUNC_START(kuz_decrypt_16way_ttable)
 	ldp	q0, q1, [x2]
 	ldp	q2, q3, [x2, #32]
 	ldp	q4, q5, [x2, #64]
@@ -1390,7 +1532,7 @@ SYM_FUNC_START(kuz_decrypt_16way)
 	stp	q12, q13, [x1, #192]
 	stp	q14, q15, [x1, #224]
 	ret
-SYM_FUNC_END(kuz_decrypt_16way)
+SYM_FUNC_END(kuz_decrypt_16way_ttable)
 
 
 .pushsection .rodata
@@ -1428,6 +1570,42 @@ SYM_FUNC_END(kuz_decrypt_16way)
 	.byte 0xcb, 0x9b, 0x25, 0xd0, 0xbe, 0xe5, 0x6c, 0x52
 	.byte 0x59, 0xa6, 0x74, 0xd2, 0xe6, 0xf4, 0xb4, 0xc0
 	.byte 0xd1, 0x66, 0xaf, 0xc2, 0x39, 0x4b, 0x63, 0xb6
+
+.align 4
+.Lkuz_pi_inv:
+	.byte 0xa5, 0x2d, 0x32, 0x8f, 0x0e, 0x30, 0x38, 0xc0
+	.byte 0x54, 0xe6, 0x9e, 0x39, 0x55, 0x7e, 0x52, 0x91
+	.byte 0x64, 0x03, 0x57, 0x5a, 0x1c, 0x60, 0x07, 0x18
+	.byte 0x21, 0x72, 0xa8, 0xd1, 0x29, 0xc6, 0xa4, 0x3f
+	.byte 0xe0, 0x27, 0x8d, 0x0c, 0x82, 0xea, 0xae, 0xb4
+	.byte 0x9a, 0x63, 0x49, 0xe5, 0x42, 0xe4, 0x15, 0xb7
+	.byte 0xc8, 0x06, 0x70, 0x9d, 0x41, 0x75, 0x19, 0xc9
+	.byte 0xaa, 0xfc, 0x4d, 0xbf, 0x2a, 0x73, 0x84, 0xd5
+	.byte 0xc3, 0xaf, 0x2b, 0x86, 0xa7, 0xb1, 0xb2, 0x5b
+	.byte 0x46, 0xd3, 0x9f, 0xfd, 0xd4, 0x0f, 0x9c, 0x2f
+	.byte 0x9b, 0x43, 0xef, 0xd9, 0x79, 0xb6, 0x53, 0x7f
+	.byte 0xc1, 0xf0, 0x23, 0xe7, 0x25, 0x5e, 0xb5, 0x1e
+	.byte 0xa2, 0xdf, 0xa6, 0xfe, 0xac, 0x22, 0xf9, 0xe2
+	.byte 0x4a, 0xbc, 0x35, 0xca, 0xee, 0x78, 0x05, 0x6b
+	.byte 0x51, 0xe1, 0x59, 0xa3, 0xf2, 0x71, 0x56, 0x11
+	.byte 0x6a, 0x89, 0x94, 0x65, 0x8c, 0xbb, 0x77, 0x3c
+	.byte 0x7b, 0x28, 0xab, 0xd2, 0x31, 0xde, 0xc4, 0x5f
+	.byte 0xcc, 0xcf, 0x76, 0x2c, 0xb8, 0xd8, 0x2e, 0x36
+	.byte 0xdb, 0x69, 0xb3, 0x14, 0x95, 0xbe, 0x62, 0xa1
+	.byte 0x3b, 0x16, 0x66, 0xe9, 0x5c, 0x6c, 0x6d, 0xad
+	.byte 0x37, 0x61, 0x4b, 0xb9, 0xe3, 0xba, 0xf1, 0xa0
+	.byte 0x85, 0x83, 0xda, 0x47, 0xc5, 0xb0, 0x33, 0xfa
+	.byte 0x96, 0x6f, 0x6e, 0xc2, 0xf6, 0x50, 0xff, 0x5d
+	.byte 0xa9, 0x8e, 0x17, 0x1b, 0x97, 0x7d, 0xec, 0x58
+	.byte 0xf7, 0x1f, 0xfb, 0x7c, 0x09, 0x0d, 0x7a, 0x67
+	.byte 0x45, 0x87, 0xdc, 0xe8, 0x4f, 0x1d, 0x4e, 0x04
+	.byte 0xeb, 0xf8, 0xf3, 0x3e, 0x3d, 0xbd, 0x8a, 0x88
+	.byte 0xdd, 0xcd, 0x0b, 0x13, 0x98, 0x02, 0x93, 0x80
+	.byte 0x90, 0xd0, 0x24, 0x34, 0xcb, 0xed, 0xf4, 0xce
+	.byte 0x99, 0x10, 0x44, 0x40, 0x92, 0x3a, 0x01, 0x26
+	.byte 0x12, 0x1a, 0x48, 0x68, 0xf5, 0x81, 0x8b, 0xc7
+	.byte 0xd6, 0x20, 0x0a, 0x08, 0x00, 0x4c, 0xd7, 0x74
+
 
 .align 4
 .Lkuz_lmul:
