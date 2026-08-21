@@ -754,51 +754,88 @@ SYM_FUNC_END(kuz_decrypt_8way)
  * S uses the resident pi table; L evaluates R^16 at full .16b width.
  */
 
-.macro KUZ_SBOX16_ONE reg, tmp, const64
-	mov	\tmp\().16b, \reg\().16b
-	tbl	\reg\().16b, {v16.16b-v19.16b}, \tmp\().16b
-	sub	\tmp\().16b, \tmp\().16b, \const64\().16b
-	tbx	\reg\().16b, {v20.16b-v23.16b}, \tmp\().16b
-	sub	\tmp\().16b, \tmp\().16b, \const64\().16b
-	tbx	\reg\().16b, {v24.16b-v27.16b}, \tmp\().16b
-	sub	\tmp\().16b, \tmp\().16b, \const64\().16b
-	tbx	\reg\().16b, {v28.16b-v31.16b}, \tmp\().16b
+.macro KUZ_SBOX16_GROUP r0, r1, r2, r3, r4, r5, r6, r7
+	adrp	x5, .Lkuz_pi
+	add	x5, x5, :lo12:.Lkuz_pi
+	movi	v28.16b, #64
+
+	ld1	{v24.16b-v27.16b}, [x5], #64
+	tbl	v16.16b, {v24.16b-v27.16b}, \r0\().16b
+	tbl	v17.16b, {v24.16b-v27.16b}, \r1\().16b
+	tbl	v18.16b, {v24.16b-v27.16b}, \r2\().16b
+	tbl	v19.16b, {v24.16b-v27.16b}, \r3\().16b
+	tbl	v20.16b, {v24.16b-v27.16b}, \r4\().16b
+	tbl	v21.16b, {v24.16b-v27.16b}, \r5\().16b
+	tbl	v22.16b, {v24.16b-v27.16b}, \r6\().16b
+	tbl	v23.16b, {v24.16b-v27.16b}, \r7\().16b
+
+	sub	\r0\().16b, \r0\().16b, v28.16b
+	sub	\r1\().16b, \r1\().16b, v28.16b
+	sub	\r2\().16b, \r2\().16b, v28.16b
+	sub	\r3\().16b, \r3\().16b, v28.16b
+	sub	\r4\().16b, \r4\().16b, v28.16b
+	sub	\r5\().16b, \r5\().16b, v28.16b
+	sub	\r6\().16b, \r6\().16b, v28.16b
+	sub	\r7\().16b, \r7\().16b, v28.16b
+	ld1	{v24.16b-v27.16b}, [x5], #64
+	tbx	v16.16b, {v24.16b-v27.16b}, \r0\().16b
+	tbx	v17.16b, {v24.16b-v27.16b}, \r1\().16b
+	tbx	v18.16b, {v24.16b-v27.16b}, \r2\().16b
+	tbx	v19.16b, {v24.16b-v27.16b}, \r3\().16b
+	tbx	v20.16b, {v24.16b-v27.16b}, \r4\().16b
+	tbx	v21.16b, {v24.16b-v27.16b}, \r5\().16b
+	tbx	v22.16b, {v24.16b-v27.16b}, \r6\().16b
+	tbx	v23.16b, {v24.16b-v27.16b}, \r7\().16b
+
+	sub	\r0\().16b, \r0\().16b, v28.16b
+	sub	\r1\().16b, \r1\().16b, v28.16b
+	sub	\r2\().16b, \r2\().16b, v28.16b
+	sub	\r3\().16b, \r3\().16b, v28.16b
+	sub	\r4\().16b, \r4\().16b, v28.16b
+	sub	\r5\().16b, \r5\().16b, v28.16b
+	sub	\r6\().16b, \r6\().16b, v28.16b
+	sub	\r7\().16b, \r7\().16b, v28.16b
+	ld1	{v24.16b-v27.16b}, [x5], #64
+	tbx	v16.16b, {v24.16b-v27.16b}, \r0\().16b
+	tbx	v17.16b, {v24.16b-v27.16b}, \r1\().16b
+	tbx	v18.16b, {v24.16b-v27.16b}, \r2\().16b
+	tbx	v19.16b, {v24.16b-v27.16b}, \r3\().16b
+	tbx	v20.16b, {v24.16b-v27.16b}, \r4\().16b
+	tbx	v21.16b, {v24.16b-v27.16b}, \r5\().16b
+	tbx	v22.16b, {v24.16b-v27.16b}, \r6\().16b
+	tbx	v23.16b, {v24.16b-v27.16b}, \r7\().16b
+
+	sub	\r0\().16b, \r0\().16b, v28.16b
+	sub	\r1\().16b, \r1\().16b, v28.16b
+	sub	\r2\().16b, \r2\().16b, v28.16b
+	sub	\r3\().16b, \r3\().16b, v28.16b
+	sub	\r4\().16b, \r4\().16b, v28.16b
+	sub	\r5\().16b, \r5\().16b, v28.16b
+	sub	\r6\().16b, \r6\().16b, v28.16b
+	sub	\r7\().16b, \r7\().16b, v28.16b
+	ld1	{v24.16b-v27.16b}, [x5]
+	tbx	v16.16b, {v24.16b-v27.16b}, \r0\().16b
+	tbx	v17.16b, {v24.16b-v27.16b}, \r1\().16b
+	tbx	v18.16b, {v24.16b-v27.16b}, \r2\().16b
+	tbx	v19.16b, {v24.16b-v27.16b}, \r3\().16b
+	tbx	v20.16b, {v24.16b-v27.16b}, \r4\().16b
+	tbx	v21.16b, {v24.16b-v27.16b}, \r5\().16b
+	tbx	v22.16b, {v24.16b-v27.16b}, \r6\().16b
+	tbx	v23.16b, {v24.16b-v27.16b}, \r7\().16b
+
+	mov	\r0\().16b, v16.16b
+	mov	\r1\().16b, v17.16b
+	mov	\r2\().16b, v18.16b
+	mov	\r3\().16b, v19.16b
+	mov	\r4\().16b, v20.16b
+	mov	\r5\().16b, v21.16b
+	mov	\r6\().16b, v22.16b
+	mov	\r7\().16b, v23.16b
 .endm
 
 .macro KUZ_SBOX16
-	KUZ_LOAD_PI
-	sub	sp, sp, #32
-	stp	q14, q15, [sp]
-	movi	v15.16b, #64
-
-	KUZ_SBOX16_ONE v0, v14, v15
-	KUZ_SBOX16_ONE v1, v14, v15
-	KUZ_SBOX16_ONE v2, v14, v15
-	KUZ_SBOX16_ONE v3, v14, v15
-	KUZ_SBOX16_ONE v4, v14, v15
-	KUZ_SBOX16_ONE v5, v14, v15
-	KUZ_SBOX16_ONE v6, v14, v15
-	KUZ_SBOX16_ONE v7, v14, v15
-	KUZ_SBOX16_ONE v8, v14, v15
-	KUZ_SBOX16_ONE v9, v14, v15
-	KUZ_SBOX16_ONE v10, v14, v15
-	KUZ_SBOX16_ONE v11, v14, v15
-	KUZ_SBOX16_ONE v12, v14, v15
-	KUZ_SBOX16_ONE v13, v14, v15
-
-	ldp	q14, q15, [sp]
-	add	sp, sp, #32
-
-	/* Process v14, v15 using v0, v1 as temporaries */
-	sub	sp, sp, #32
-	stp	q0, q1, [sp]
-	movi	v1.16b, #64
-
-	KUZ_SBOX16_ONE v14, v0, v1
-	KUZ_SBOX16_ONE v15, v0, v1
-
-	ldp	q0, q1, [sp]
-	add	sp, sp, #32
+	KUZ_SBOX16_GROUP v0, v1, v2, v3, v4, v5, v6, v7
+	KUZ_SBOX16_GROUP v8, v9, v10, v11, v12, v13, v14, v15
 .endm
 
 /* Transpose 16 blocks (16x16 bytes) in place */
