@@ -84,7 +84,7 @@ static inline void kuz_simd_end(void)
 #endif
 
 #define KUZ_SIMD_DRIVER(name) name "-kuznyechik-simd-" KUZ_SIMD_ARCH
-#define KUZ_SIMD_VERSION "20260821.2"
+#define KUZ_SIMD_VERSION "20260821.3"
 
 static unsigned int bench_ms;
 module_param(bench_ms, uint, 0444);

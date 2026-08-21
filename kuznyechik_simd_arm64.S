@@ -444,43 +444,75 @@ SYM_FUNC_END(kuz_decrypt_4way)
 	eor	\dst\().8b, \dst\().8b, \tmp\().8b
 .endm
 
-/* One R step.  The new byte is written over the dropped a15 register. */
+/*
+ * One R step.  Keep the independent GF branches separate so their tbl
+ * latency can overlap with XOR/xtime work.  Commit a15 only at the end.
+ * v16..v23/v31 are scratch; v24..v30 remain the fixed GF tables/constants.
+ */
 .macro KUZ_R8 a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15
-	/* G = a6 ^ a8 ^ a15, plus C/E/F and 2*F. */
-	eor	\a15\().8b, \a15\().8b, \a6\().8b
-	eor	\a15\().8b, \a15\().8b, \a8\().8b
+	/* C, E, F, B, A, D and G ^ C ^ E ^ F. */
 	eor	v16.8b, \a2\().8b, \a12\().8b
-	eor	\a15\().8b, \a15\().8b, v16.8b
 	eor	v17.8b, \a4\().8b, \a10\().8b
-	eor	\a15\().8b, \a15\().8b, v17.8b
 	eor	v18.8b, \a5\().8b, \a9\().8b
-	eor	\a15\().8b, \a15\().8b, v18.8b
+	eor	v19.8b, \a1\().8b, \a13\().8b
+	eor	v20.8b, \a0\().8b, \a14\().8b
+	eor	v21.8b, \a3\().8b, \a11\().8b
+	eor	v22.8b, \a15\().8b, \a6\().8b
+	eor	v23.8b, v17.8b, v18.8b
+	eor	v22.8b, v22.8b, \a8\().8b
+	eor	v22.8b, v22.8b, v16.8b
+	eor	v22.8b, v22.8b, v23.8b
 
-	/* 195 * (E ^ F).  mul195 low == mul16 high. */
-	eor	v19.8b, v17.8b, v18.8b
-	KUZ_MUL_NIB v19, v19, v25, v28, v17
-	eor	\a15\().8b, \a15\().8b, v19.8b
+	/* Start 195 * (E ^ F), then fill tbl latency with 2*F and 2*B. */
+	ushr	v31.8b, v23.8b, #4
+	and	v23.8b, v23.8b, v29.8b
+	tbl	v23.8b, {v25.16b}, v23.8b
 
-	KUZ_XTIME v19, v18, v17
-	eor	\a15\().8b, \a15\().8b, v19.8b
+	sshr	v17.8b, v18.8b, #7
+	shl	v18.8b, v18.8b, #1
+	and	v17.8b, v17.8b, v30.8b
+	eor	v18.8b, v18.8b, v17.8b
 
-	/* 16 * (2*B ^ C ^ D ^ H). */
-	eor	v17.8b, \a1\().8b, \a13\().8b
-	KUZ_XTIME v19, v17, v18
-	eor	v19.8b, v19.8b, v16.8b
-	eor	v17.8b, \a3\().8b, \a11\().8b
+	sshr	v17.8b, v19.8b, #7
+	shl	v19.8b, v19.8b, #1
+	and	v17.8b, v17.8b, v30.8b
 	eor	v19.8b, v19.8b, v17.8b
-	eor	v19.8b, v19.8b, \a7\().8b
-	KUZ_MUL_NIB v19, v19, v24, v25, v17
-	eor	\a15\().8b, \a15\().8b, v19.8b
 
-	/* 148 * (A ^ C ^ 2*H). */
-	eor	v17.8b, \a0\().8b, \a14\().8b
-	eor	v17.8b, v17.8b, v16.8b
-	KUZ_XTIME v19, \a7, v18
-	eor	v17.8b, v17.8b, v19.8b
-	KUZ_MUL_NIB v17, v17, v26, v27, v18
-	eor	\a15\().8b, \a15\().8b, v17.8b
+	tbl	v31.8b, {v28.16b}, v31.8b
+
+	/* Prepare the 16 * branch while the second 195 lookup completes. */
+	eor	v19.8b, v19.8b, v16.8b
+	eor	v19.8b, v19.8b, v21.8b
+	eor	v19.8b, v19.8b, \a7\().8b
+	eor	v23.8b, v23.8b, v31.8b
+
+	ushr	v31.8b, v19.8b, #4
+	and	v19.8b, v19.8b, v29.8b
+	tbl	v19.8b, {v24.16b}, v19.8b
+
+	/* Prepare 148 * (A ^ C ^ 2*H) while the 16 lookup is in flight. */
+	sshr	v17.8b, \a7\().8b, #7
+	shl	v21.8b, \a7\().8b, #1
+	and	v17.8b, v17.8b, v30.8b
+	eor	v21.8b, v21.8b, v17.8b
+	eor	v20.8b, v20.8b, v16.8b
+	eor	v20.8b, v20.8b, v21.8b
+	eor	v18.8b, v18.8b, v23.8b
+
+	tbl	v31.8b, {v25.16b}, v31.8b
+	eor	v19.8b, v19.8b, v31.8b
+
+	/* 148 * branch. */
+	ushr	v31.8b, v20.8b, #4
+	and	v20.8b, v20.8b, v29.8b
+	tbl	v20.8b, {v26.16b}, v20.8b
+	eor	v22.8b, v22.8b, v18.8b
+	tbl	v31.8b, {v27.16b}, v31.8b
+	eor	v20.8b, v20.8b, v31.8b
+
+	/* Balanced final reduction, then overwrite the dropped byte position. */
+	eor	v19.8b, v19.8b, v20.8b
+	eor	\a15\().8b, v22.8b, v19.8b
 .endm
 
 .macro KUZ_L8
