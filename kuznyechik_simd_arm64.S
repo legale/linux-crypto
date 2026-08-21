@@ -557,6 +557,35 @@ SYM_FUNC_START(kuz_encrypt_8way)
 	ret
 SYM_FUNC_END(kuz_encrypt_8way)
 
+/* Benchmark-only primitives for isolating the tableless S and L costs. */
+SYM_FUNC_START(kuz_sbox_8way)
+	ldp	q0, q1, [x1]
+	ldp	q2, q3, [x1, #32]
+	ldp	q4, q5, [x1, #64]
+	ldp	q6, q7, [x1, #96]
+	KUZ_SBOX8
+	stp	q0, q1, [x0]
+	stp	q2, q3, [x0, #32]
+	stp	q4, q5, [x0, #64]
+	stp	q6, q7, [x0, #96]
+	ret
+SYM_FUNC_END(kuz_sbox_8way)
+
+SYM_FUNC_START(kuz_l_8way)
+	ldp	q0, q1, [x1]
+	ldp	q2, q3, [x1, #32]
+	ldp	q4, q5, [x1, #64]
+	ldp	q6, q7, [x1, #96]
+	KUZ_PACK8
+	KUZ_L8
+	KUZ_UNPACK8
+	stp	q0, q1, [x0]
+	stp	q2, q3, [x0, #32]
+	stp	q4, q5, [x0, #64]
+	stp	q6, q7, [x0, #96]
+	ret
+SYM_FUNC_END(kuz_l_8way)
+
 
 /* x9: big-endian low counter, x8: big-endian high counter. */
 .macro KUZ_CTR_BLOCK reg, inc
