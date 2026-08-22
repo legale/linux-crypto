@@ -16,12 +16,20 @@ obj-m += kuznyechik_simd.o
 endif
 
 gost28147_generic-y := gost28147_basic.o gost28147_modes.o
+kuznyechik_generic-y := kuznyechik_generic_glue.o libpogost/kuznyechik_generic.o
+streebog_generic-y := streebog_generic_glue.o libpogost/streebog_generic.o
 kuznyechik_simd-y := kuznyechik_simd_glue.o
 kuznyechik_simd-$(CONFIG_X86_64) += kuznyechik_simd_x86_64.o
 kuznyechik_simd-$(CONFIG_ARM64) += kuznyechik_simd_arm64.o
 gost-test-y:= testmgr.o gost-test-main.o
 
-ccflags-y := -I $(src)
+ccflags-y := -I $(src)/../libpogost/include -I $(src)/../libpogost/src -I $(src)
+
+$(obj)/libpogost/kuznyechik_generic.o: $(src)/../libpogost/src/generic/kuznyechik_generic.c FORCE
+	$(call if_changed_dep,cc_o_c)
+
+$(obj)/libpogost/streebog_generic.o: $(src)/../libpogost/src/generic/streebog_generic.c FORCE
+	$(call if_changed_dep,cc_o_c)
 
 # Make IS_ENABLED(CONFIG_CRYPTO_STREEBOG) work
 ifneq ($(CONFIG_CRYPTO_STREEBOG),n)
